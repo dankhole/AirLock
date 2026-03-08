@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="popup.css">
+  <title>Airlock</title>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>Airlock</h1>
+      <label class="toggle">
+        <input type="checkbox" id="enabled-toggle" checked>
+        <span class="toggle-slider"></span>
+      </label>
+    </header>
+
+    <section class="delay-section">
+      <label for="delay-input">Delay</label>
+      <div class="delay-input-group">
+        <input type="number" id="delay-input" min="1" max="600" value="30">
+        <span class="delay-unit">seconds</span>
+      </div>
+    </section>
+
+    <section class="sites-section">
+      <h2>Tracked Sites</h2>
+      <button id="add-current-btn" class="add-current-btn" style="display: none"></button>
+      <ul id="site-list" class="site-list"></ul>
+      <form id="add-site-form" class="add-site-form">
+        <input type="text" id="site-input" placeholder="example.com" autocomplete="off">
+        <button type="submit" id="add-site-btn">+</button>
+      </form>
+    </section>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

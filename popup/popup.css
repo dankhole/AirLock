@@ -1,0 +1,241 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 350px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 16px;
+  color: #1a1a2e;
+  background: #f8f9fc;
+}
+
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Header */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.header h1 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+/* Toggle Switch */
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #ccc;
+  border-radius: 24px;
+  transition: background 0.2s;
+}
+
+.toggle-slider::before {
+  content: "";
+  position: absolute;
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.toggle input:checked + .toggle-slider {
+  background: #5b8def;
+}
+
+.toggle input:checked + .toggle-slider::before {
+  transform: translateX(20px);
+}
+
+/* Delay Section */
+.delay-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: white;
+  border-radius: 8px;
+  border: 1px solid #e8eaf0;
+}
+
+.delay-section label {
+  font-size: 14px;
+  font-weight: 500;
+  color: #555;
+}
+
+.delay-input-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.delay-input-group input {
+  width: 60px;
+  padding: 4px 8px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+  text-align: center;
+  outline: none;
+}
+
+.delay-input-group input:focus {
+  border-color: #5b8def;
+}
+
+.delay-unit {
+  font-size: 13px;
+  color: #888;
+}
+
+/* Sites Section */
+.sites-section h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #555;
+  margin-bottom: 8px;
+}
+
+/* Add Current Site Button */
+.add-current-btn {
+  width: 100%;
+  padding: 7px 10px;
+  background: white;
+  color: #5b8def;
+  border: 1px dashed #5b8def;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  margin-bottom: 8px;
+  transition: background 0.15s;
+}
+
+.add-current-btn:hover {
+  background: #f0f4ff;
+}
+
+.site-list {
+  list-style: none;
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.site-list:empty::after {
+  content: "No sites tracked yet.";
+  font-size: 13px;
+  color: #aaa;
+  font-style: italic;
+  padding: 8px 0;
+}
+
+.site-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: white;
+  border-radius: 6px;
+  border: 1px solid #e8eaf0;
+  font-size: 13px;
+  transition: border-color 0.15s;
+}
+
+.site-item.confirm-remove {
+  border-color: #e74c3c;
+  background: #fef5f5;
+}
+
+.site-item span {
+  color: #333;
+}
+
+.site-item button {
+  background: none;
+  border: none;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  line-height: 1;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.site-item button:hover {
+  color: #e74c3c;
+}
+
+.site-item.confirm-remove button {
+  color: white;
+  background: #e74c3c;
+}
+
+/* Add Site Form */
+.add-site-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.add-site-form input {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+}
+
+.add-site-form input:focus {
+  border-color: #5b8def;
+}
+
+.add-site-form button {
+  padding: 6px 12px;
+  background: #5b8def;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.add-site-form button:hover {
+  background: #4a7de0;
+}
