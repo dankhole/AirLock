@@ -2,5 +2,7 @@
 node_modules/
 dist/
 *.zip
+store/
 .claude/
+CLAUDE.md
 docs/

@@ -38,6 +38,18 @@ function buildForBrowser(browser) {
   }
   // Firefox uses the "scripts" key which is already in the base manifest
 
+  if (browser === "firefox") {
+    manifest.browser_specific_settings = {
+      gecko: {
+        id: "airlock@dankhole",
+        strict_min_version: "142.0",
+        data_collection_permissions: {
+          required: ["none"],
+        },
+      },
+    };
+  }
+
   // Copy polyfill
   const polyfillSrc = path.join(rootDir, "node_modules", "webextension-polyfill", "dist", "browser-polyfill.min.js");
   if (fs.existsSync(polyfillSrc)) {
