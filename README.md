@@ -30,7 +30,20 @@ npm run build:firefox  # Firefox only
 
 The build script handles browser differences automatically:
 - **Chrome**: converts background to `service_worker`, injects `webextension-polyfill` into background/popup/content scripts
-- **Firefox**: uses the base manifest as-is (native `browser.*` support)
+- **Firefox**: uses the authored `firefox/manifest.json` with native `browser.*` support
+
+## Firefox AMO Package
+
+For official Firefox uploads, package the authored source files directly instead of using `dist/firefox`:
+
+```sh
+mkdir -p store
+rm -f store/firefox-addon-1.0.1.zip
+zip -j store/firefox-addon-1.0.1.zip firefox/manifest.json
+zip -r store/firefox-addon-1.0.1.zip background content popup icons -x '*.DS_Store'
+```
+
+This keeps the submitted Firefox package free of generated extension files. The AMO generated-code question can be answered "No" when using this package.
 
 ## Install
 
@@ -91,7 +104,9 @@ content.js        <-- Overlay rendering, countdown timer, visibility detection
 ## Project Structure
 
 ```
-manifest.json          Base manifest (Firefox format)
+manifest.json          Base manifest used by the Chrome build
+firefox/
+  manifest.json        Authored Firefox manifest for AMO packaging
 background/
   background.js        Service worker: sessions, focus, badge, messages
 content/

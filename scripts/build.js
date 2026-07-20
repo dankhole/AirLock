@@ -25,10 +25,13 @@ function copyFile(src, dest) {
 
 function buildForBrowser(browser) {
   const outDir = path.join(distDir, browser);
+  fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(outDir, { recursive: true });
 
-  // Read base manifest
-  const manifest = JSON.parse(fs.readFileSync(path.join(rootDir, "manifest.json"), "utf-8"));
+  const manifestPath = browser === "firefox"
+    ? path.join(rootDir, "firefox", "manifest.json")
+    : path.join(rootDir, "manifest.json");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
 
   if (browser === "chrome") {
     // Chrome uses a service worker for background
@@ -36,24 +39,13 @@ function buildForBrowser(browser) {
       service_worker: "background/background.js",
     };
   }
-  // Firefox uses the "scripts" key which is already in the base manifest
+  // Firefox uses the authored firefox/manifest.json directly.
 
-  if (browser === "firefox") {
-    manifest.browser_specific_settings = {
-      gecko: {
-        id: "airlock@dankhole",
-        strict_min_version: "142.0",
-        data_collection_permissions: {
-          required: ["none"],
-        },
-      },
-    };
-  }
-
-  // Copy polyfill
-  const polyfillSrc = path.join(rootDir, "node_modules", "webextension-polyfill", "dist", "browser-polyfill.min.js");
-  if (fs.existsSync(polyfillSrc)) {
-    copyFile(polyfillSrc, path.join(outDir, "lib", "browser-polyfill.min.js"));
+  if (browser === "chrome") {
+    const polyfillSrc = path.join(rootDir, "node_modules", "webextension-polyfill", "dist", "browser-polyfill.min.js");
+    if (fs.existsSync(polyfillSrc)) {
+      copyFile(polyfillSrc, path.join(outDir, "lib", "browser-polyfill.min.js"));
+    }
   }
 
   // Inject polyfill script tag into popup.html for Chrome
