@@ -33,11 +33,11 @@
     return;
   }
 
-  if (!response || response.type !== "SHOW_OVERLAY") return;
+  const shouldShowOverlay = response && response.type === "SHOW_OVERLAY";
 
   // --- State ---
-  let remainingMs = response.remainingMs;
-  let running = true;
+  let remainingMs = shouldShowOverlay ? response.remainingMs : 0;
+  let running = false;
   let lastTick = Date.now();
   let timerInterval = null;
   let overlay = null;
@@ -159,7 +159,7 @@
     timerEl = shadowRoot.getElementById("timer-display");
     pausedLabel = shadowRoot.getElementById("paused-label");
     continueBtn = shadowRoot.getElementById("continue-btn");
-    continueBtn.addEventListener("click", dismissOverlay);
+    continueBtn.addEventListener("click", () => dismissOverlay());
 
     updateDisplay();
 
@@ -194,8 +194,13 @@
     }
   }
 
-  function dismissOverlay() {
-    if (timerInterval) clearInterval(timerInterval);
+  function dismissOverlay(options = {}) {
+    const notifyDone = options.notifyDone !== false;
+
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
 
     if (backdrop) {
       backdrop.classList.remove("visible");
@@ -207,10 +212,12 @@
       removeOverlayElement();
     }
 
-    try {
-      browser.runtime.sendMessage({ type: "TIMER_DONE" });
-    } catch {
-      // Extension context may be invalidated
+    if (notifyDone) {
+      try {
+        browser.runtime.sendMessage({ type: "TIMER_DONE" });
+      } catch {
+        // Extension context may be invalidated
+      }
     }
   }
 
@@ -224,9 +231,33 @@
     backdrop = null;
   }
 
+  function showOverlay(nextRemainingMs) {
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+
+    remainingMs = nextRemainingMs;
+    running = !document.hidden;
+
+    if (!overlay) {
+      createOverlay();
+    } else {
+      updateDisplay();
+    }
+
+    if (remainingMs > 0) {
+      startTimer();
+    }
+  }
+
   // --- Timer Logic ---
 
   function startTimer() {
+    if (timerInterval) {
+      clearInterval(timerInterval);
+    }
+
     lastTick = Date.now();
     timerInterval = setInterval(() => {
       if (!running || remainingMs <= 0) return;
@@ -289,6 +320,8 @@
       pauseTimer();
     } else if (message.type === "RESUME") {
       resumeTimer();
+    } else if (message.type === "RESET_TIMER") {
+      showOverlay(message.remainingMs);
     }
   });
 
@@ -296,18 +329,23 @@
 
   browser.storage.onChanged.addListener((changes, areaName) => {
     if (areaName === "local" && changes.enabled && changes.enabled.newValue === false) {
-      dismissOverlay();
+      dismissOverlay({ notifyDone: false });
+    }
+
+    if (areaName === "local" && changes.sites) {
+      const nextSites = changes.sites.newValue || [];
+      const stillTracked = nextSites.some(
+        (site) => hostname === site || hostname.endsWith("." + site)
+      );
+      if (!stillTracked) {
+        dismissOverlay({ notifyDone: false });
+      }
     }
   });
 
   // --- Start ---
 
-  createOverlay();
-
-  if (document.hidden) {
-    running = false;
-    updateDisplay();
+  if (shouldShowOverlay) {
+    showOverlay(response.remainingMs);
   }
-
-  startTimer();
 })();

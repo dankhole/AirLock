@@ -11,7 +11,11 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 5. When the countdown reaches zero, a "Continue" button appears to dismiss the overlay
 6. Refreshing the page resumes the existing timer (doesn't reset it)
 7. Opening a new tab to the same site starts a fresh timer
-8. Navigating within a site after completing the timer does not re-trigger it
+8. Navigating within a site after completing the timer does not re-trigger it for 24 hours
+9. A tracked tab left open for more than 24 hours resets and requires a fresh wait
+10. Removing a tracked site or lowering the delay waits for the current delay before applying
+
+Adding tracked sites and increasing the delay still apply immediately.
 
 Domain matching: entering `reddit.com` will match `reddit.com`, `www.reddit.com`, `old.reddit.com`, etc.
 
@@ -58,6 +62,7 @@ After making source changes, run `npm run build` and reload the extension.
 ### Persistence
 - Refresh during countdown -- timer resumes, not reset
 - Open the same site in a new tab -- fresh timer
+- Leave a completed tracked tab open for 24 hours -- timer resets and appears again
 - Close and reopen the popup -- settings persist
 - Toggle extension off while overlay is active -- overlay removed
 
@@ -81,6 +86,7 @@ content.js        <-- Overlay rendering, countdown timer, visibility detection
 |---|---|
 | `storage` | Persist config and timer sessions locally |
 | `activeTab` | Read current tab URL for the "Track this site" button |
+| `alarms` | Apply delayed settings changes and 24-hour tab resets |
 
 ## Project Structure
 

@@ -119,6 +119,62 @@ body {
   color: #888;
 }
 
+/* Pending Config Change */
+.pending-config-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+}
+
+.pending-config-section[hidden] {
+  display: none;
+}
+
+.pending-config-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pending-config-title {
+  overflow: hidden;
+  color: #7c2d12;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pending-config-timer {
+  color: #1a1a2e;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.pending-config-cancel {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  background: white;
+  color: #9a3412;
+  border: 1px solid #fdba74;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.pending-config-cancel:hover {
+  background: #ffedd5;
+  border-color: #fb923c;
+}
+
 /* Sites Section */
 .sites-section h2 {
   font-size: 14px;
@@ -180,10 +236,15 @@ body {
 }
 
 .site-item span {
+  min-width: 0;
+  overflow: hidden;
   color: #333;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .site-item button {
+  flex: 0 0 auto;
   background: none;
   border: none;
   color: #ccc;
@@ -238,4 +299,11 @@ body {
 
 .add-site-form button:hover {
   background: #4a7de0;
+}
+
+button:disabled,
+input:disabled,
+.toggle input:disabled + .toggle-slider {
+  cursor: not-allowed;
+  opacity: 0.6;
 }

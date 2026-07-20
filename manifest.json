@@ -3,7 +3,7 @@
   "name": "Airlock",
   "version": "1.0.0",
   "description": "Add intentional friction before accessing distracting websites.",
-  "permissions": ["storage", "activeTab"],
+  "permissions": ["storage", "activeTab", "alarms"],
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
