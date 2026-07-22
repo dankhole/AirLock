@@ -37,9 +37,12 @@
 
   // --- State ---
   let remainingMs = shouldShowOverlay ? response.remainingMs : 0;
+  let backgroundActive = response ? response.active !== false : false;
   let running = false;
   let lastTick = Date.now();
   let timerInterval = null;
+  let activeStateInterval = null;
+  let activeStateRefreshInFlight = false;
   let overlay = null;
   let shadowRoot = null;
   let timerEl = null;
@@ -201,6 +204,8 @@
       clearInterval(timerInterval);
       timerInterval = null;
     }
+    stopActiveStatePolling();
+    running = false;
 
     if (backdrop) {
       backdrop.classList.remove("visible");
@@ -231,14 +236,15 @@
     backdrop = null;
   }
 
-  function showOverlay(nextRemainingMs) {
+  function showOverlay(nextRemainingMs, active = backgroundActive) {
     if (timerInterval) {
       clearInterval(timerInterval);
       timerInterval = null;
     }
 
     remainingMs = nextRemainingMs;
-    running = !document.hidden;
+    backgroundActive = active !== false;
+    running = false;
 
     if (!overlay) {
       createOverlay();
@@ -248,10 +254,32 @@
 
     if (remainingMs > 0) {
       startTimer();
+      startActiveStatePolling();
     }
   }
 
   // --- Timer Logic ---
+
+  function isPageActive() {
+    return document.visibilityState === "visible" && !document.hidden && document.hasFocus();
+  }
+
+  function canRunTimer() {
+    return Boolean(overlay && remainingMs > 0 && backgroundActive && isPageActive());
+  }
+
+  function setRunning(nextRunning, options = {}) {
+    if (running === nextRunning) return;
+
+    running = nextRunning;
+    lastTick = Date.now();
+
+    if (!running && options.persistPaused) {
+      persistState();
+    }
+
+    updateDisplay();
+  }
 
   function startTimer() {
     if (timerInterval) {
@@ -260,9 +288,22 @@
 
     lastTick = Date.now();
     timerInterval = setInterval(() => {
-      if (!running || remainingMs <= 0) return;
-
       const now = Date.now();
+
+      if (remainingMs <= 0) return;
+
+      if (!canRunTimer()) {
+        setRunning(false, { persistPaused: true });
+        lastTick = now;
+        return;
+      }
+
+      if (!running) {
+        setRunning(true);
+        lastTick = now;
+        return;
+      }
+
       const elapsed = now - lastTick;
       lastTick = now;
       remainingMs = Math.max(0, remainingMs - elapsed);
@@ -272,23 +313,57 @@
       if (remainingMs <= 0) {
         clearInterval(timerInterval);
         timerInterval = null;
+        stopActiveStatePolling();
+        running = false;
         persistState();
       }
     }, 250);
   }
 
   function pauseTimer() {
-    if (!running) return;
-    running = false;
-    persistState();
-    updateDisplay();
+    setRunning(false, { persistPaused: true });
   }
 
   function resumeTimer() {
-    if (running || remainingMs <= 0) return;
-    running = true;
-    lastTick = Date.now();
-    updateDisplay();
+    refreshBackgroundActiveState();
+    setRunning(canRunTimer());
+  }
+
+  function setBackgroundActive(active) {
+    backgroundActive = active === true;
+    setRunning(canRunTimer(), { persistPaused: true });
+  }
+
+  function startActiveStatePolling() {
+    stopActiveStatePolling();
+    refreshBackgroundActiveState();
+    activeStateInterval = setInterval(refreshBackgroundActiveState, 1000);
+  }
+
+  function stopActiveStatePolling() {
+    if (activeStateInterval) {
+      clearInterval(activeStateInterval);
+      activeStateInterval = null;
+    }
+  }
+
+  function refreshBackgroundActiveState() {
+    if (activeStateRefreshInFlight || !overlay || remainingMs <= 0) return;
+
+    activeStateRefreshInFlight = true;
+    browser.runtime
+      .sendMessage({ type: "GET_ACTIVE_STATE" })
+      .then((state) => {
+        if (state && typeof state.active === "boolean") {
+          setBackgroundActive(state.active);
+        }
+      })
+      .catch(() => {
+        setBackgroundActive(false);
+      })
+      .finally(() => {
+        activeStateRefreshInFlight = false;
+      });
   }
 
   function persistState() {
@@ -317,11 +392,15 @@
 
   browser.runtime.onMessage.addListener((message) => {
     if (message.type === "PAUSE") {
+      setBackgroundActive(false);
       pauseTimer();
     } else if (message.type === "RESUME") {
+      setBackgroundActive(true);
       resumeTimer();
+    } else if (message.type === "ACTIVE_STATE") {
+      setBackgroundActive(message.active);
     } else if (message.type === "RESET_TIMER") {
-      showOverlay(message.remainingMs);
+      showOverlay(message.remainingMs, message.active);
     }
   });
 
@@ -346,6 +425,6 @@
   // --- Start ---
 
   if (shouldShowOverlay) {
-    showOverlay(response.remainingMs);
+    showOverlay(response.remainingMs, response.active);
   }
 })();

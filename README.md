@@ -4,16 +4,17 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 
 ## How It Works
 
-1. You configure a list of websites and a delay duration (in seconds) via the popup
+1. You configure a list of websites, a wait duration in minutes, and a reset window in hours via the popup
 2. When any tab navigates to a tracked site, a fullscreen overlay appears with a countdown timer and breathing animation
 3. The timer **pauses** when you switch tabs, switch windows, or minimize the browser
 4. The timer **resumes** when you return to the tab
 5. When the countdown reaches zero, a "Continue" button appears to dismiss the overlay
 6. Refreshing the page resumes the existing timer (doesn't reset it)
 7. Opening a new tab to the same site starts a fresh timer
-8. Navigating within a site after completing the timer does not re-trigger it for 24 hours
-9. A tracked tab left open for more than 24 hours resets and requires a fresh wait
-10. Removing a tracked site or lowering the delay waits for the current delay before applying
+8. Navigating within a site after completing the timer does not re-trigger it until the configured reset window passes
+9. A tracked tab left open past the configured reset window requires a fresh wait
+10. Removing a tracked site or lowering the wait duration waits for the current wait duration before applying
+11. Site-removal waits only count down while the settings popup is open
 
 Adding tracked sites and increasing the delay still apply immediately.
 
@@ -75,8 +76,8 @@ After making source changes, run `npm run build` and reload the extension.
 ### Persistence
 - Refresh during countdown -- timer resumes, not reset
 - Open the same site in a new tab -- fresh timer
-- Leave a completed tracked tab open for 24 hours -- timer resets and appears again
-- Close and reopen the popup -- settings persist
+- Leave a completed tracked tab open past the configured reset window -- timer resets and appears again
+- Close and reopen the popup during a site-removal wait -- remaining time is preserved
 - Toggle extension off while overlay is active -- overlay removed
 
 ## Architecture
@@ -99,7 +100,7 @@ content.js        <-- Overlay rendering, countdown timer, visibility detection
 |---|---|
 | `storage` | Persist config and timer sessions locally |
 | `activeTab` | Read current tab URL for the "Track this site" button |
-| `alarms` | Apply delayed settings changes and 24-hour tab resets |
+| `alarms` | Apply delayed settings changes and configured tab resets |
 
 ## Project Structure
 

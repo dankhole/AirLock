@@ -17,10 +17,18 @@
     </header>
 
     <section class="delay-section">
-      <label for="delay-input">Delay</label>
+      <label for="delay-input">Wait</label>
       <div class="delay-input-group">
-        <input type="number" id="delay-input" min="1" max="600" value="30">
-        <span class="delay-unit">seconds</span>
+        <input type="number" id="delay-input" min="1" max="600" value="1">
+        <span class="delay-unit">minutes</span>
+      </div>
+    </section>
+
+    <section class="delay-section">
+      <label for="reset-input">Reset after</label>
+      <div class="delay-input-group">
+        <input type="number" id="reset-input" min="1" max="8760" value="24">
+        <span class="delay-unit">hours</span>
       </div>
     </section>
 

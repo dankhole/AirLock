@@ -4,44 +4,29 @@
 const DEFAULT_CONFIG = {
   enabled: true,
   sites: [],
-  delaySeconds: 30
+  delayMinutes: 1,
+  resetHours: 24
 };
 
 const PENDING_CONFIG_CHANGE_KEY = "pendingConfigChange";
 const PENDING_CONFIG_CHANGE_ALARM = "airlock.pendingConfigChange";
 const SESSION_RESET_ALARM = "airlock.sessionReset";
-const SESSION_RESET_MS = 24 * 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
 
 // --- Initialization ---
 
 browser.runtime.onInstalled.addListener(async () => {
-  const existing = await browser.storage.local.get(["enabled", "sites", "delaySeconds"]);
-  const defaults = {};
-  if (existing.enabled === undefined) defaults.enabled = DEFAULT_CONFIG.enabled;
-  if (existing.sites === undefined) defaults.sites = DEFAULT_CONFIG.sites;
-  if (existing.delaySeconds === undefined) defaults.delaySeconds = DEFAULT_CONFIG.delaySeconds;
-  if (Object.keys(defaults).length > 0) {
-    await browser.storage.local.set(defaults);
-  }
+  await migrateStoredConfig();
   await reconcilePendingConfigChange();
   await reconcileExpiredSessions();
 });
 
 browser.runtime.onStartup.addListener(() => {
-  reconcilePendingConfigChange().catch((error) => {
-    console.warn("[Airlock] Failed to reconcile pending config change:", error);
-  });
-  reconcileExpiredSessions().catch((error) => {
-    console.warn("[Airlock] Failed to reconcile expired sessions:", error);
-  });
+  reconcileStartupState();
 });
 
-reconcilePendingConfigChange().catch((error) => {
-  console.warn("[Airlock] Failed to reconcile pending config change:", error);
-});
-reconcileExpiredSessions().catch((error) => {
-  console.warn("[Airlock] Failed to reconcile expired sessions:", error);
-});
+reconcileStartupState();
 
 // --- Helpers ---
 
@@ -49,12 +34,59 @@ function getSessionKey(tabId) {
   return "session_" + tabId;
 }
 
+async function reconcileStartupState() {
+  try {
+    await migrateStoredConfig();
+    await reconcilePendingConfigChange();
+    await reconcileExpiredSessions();
+  } catch (error) {
+    console.warn("[Airlock] Failed to reconcile startup state:", error);
+  }
+}
+
+async function migrateStoredConfig() {
+  const existing = await browser.storage.local.get([
+    "enabled",
+    "sites",
+    "delayMinutes",
+    "delaySeconds",
+    "resetHours"
+  ]);
+  const updates = {};
+
+  if (existing.enabled === undefined) updates.enabled = DEFAULT_CONFIG.enabled;
+  if (existing.sites === undefined) updates.sites = DEFAULT_CONFIG.sites;
+
+  if (existing.delayMinutes === undefined) {
+    updates.delayMinutes = DEFAULT_CONFIG.delayMinutes;
+  } else {
+    const delayMinutes = clampDelayMinutes(existing.delayMinutes);
+    if (delayMinutes !== existing.delayMinutes) updates.delayMinutes = delayMinutes;
+  }
+
+  if (existing.resetHours === undefined) {
+    updates.resetHours = DEFAULT_CONFIG.resetHours;
+  } else {
+    const resetHours = clampResetHours(existing.resetHours);
+    if (resetHours !== existing.resetHours) updates.resetHours = resetHours;
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await browser.storage.local.set(updates);
+  }
+
+  if (existing.delaySeconds !== undefined) {
+    await browser.storage.local.remove("delaySeconds");
+  }
+}
+
 async function readConfig() {
-  const result = await browser.storage.local.get(["enabled", "sites", "delaySeconds"]);
+  const result = await browser.storage.local.get(["enabled", "sites", "delayMinutes", "resetHours"]);
   return {
     enabled: result.enabled !== false,
     sites: result.sites || [],
-    delaySeconds: clampDelaySeconds(result.delaySeconds || DEFAULT_CONFIG.delaySeconds)
+    delayMinutes: clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes),
+    resetHours: clampResetHours(result.resetHours || DEFAULT_CONFIG.resetHours)
   };
 }
 
@@ -67,11 +99,18 @@ function isDomainTracked(hostname, sites) {
   return sites.some((site) => hostname === site || hostname.endsWith("." + site));
 }
 
-function clampDelaySeconds(value) {
-  let seconds = parseInt(value, 10);
-  if (isNaN(seconds) || seconds < 1) seconds = 1;
-  if (seconds > 600) seconds = 600;
-  return seconds;
+function clampDelayMinutes(value) {
+  let minutes = parseInt(value, 10);
+  if (isNaN(minutes) || minutes < 1) minutes = 1;
+  if (minutes > 600) minutes = 600;
+  return minutes;
+}
+
+function clampResetHours(value) {
+  let hours = parseInt(value, 10);
+  if (isNaN(hours) || hours < 1) hours = 1;
+  if (hours > 8760) hours = 8760;
+  return hours;
 }
 
 async function getSession(tabId) {
@@ -92,6 +131,33 @@ async function removeSession(tabId) {
   await scheduleSessionResetAlarm();
 }
 
+async function isTabActiveAndFocused(tabId) {
+  try {
+    const tab = await browser.tabs.get(tabId);
+    if (!tab || !tab.active) return false;
+
+    const window = await browser.windows.get(tab.windowId);
+    return Boolean(window && window.focused);
+  } catch {
+    return false;
+  }
+}
+
+async function sendTabMessage(tabId, message) {
+  try {
+    await browser.tabs.sendMessage(tabId, message);
+  } catch {
+    // Tab may not have content script
+  }
+}
+
+async function sendActiveState(tabId, active) {
+  await sendTabMessage(tabId, {
+    type: "ACTIVE_STATE",
+    active: active
+  });
+}
+
 function getTabIdFromSessionKey(key) {
   const match = /^session_(\d+)$/.exec(key);
   return match ? Number(match[1]) : null;
@@ -108,18 +174,22 @@ async function getAllSessions() {
     .filter((entry) => entry.tabId !== null && entry.session && entry.session.domain);
 }
 
-function createTimerSession(domain, delaySeconds, now = Date.now()) {
-  const remainingMs = delaySeconds * 1000;
+function createTimerSession(domain, delayMinutes, resetHours, now = Date.now()) {
+  const remainingMs = delayMinutes * MINUTE_MS;
   return {
     domain: domain,
     createdAt: now,
-    expiresAt: now + SESSION_RESET_MS,
+    expiresAt: now + resetHours * HOUR_MS,
     remainingMs: remainingMs
   };
 }
 
-function isSessionExpired(session, now = Date.now()) {
-  return Boolean(session.expiresAt && session.expiresAt <= now);
+function getSessionExpiresAt(session, resetHours) {
+  return (session.createdAt || Date.now()) + resetHours * HOUR_MS;
+}
+
+function isSessionExpired(session, resetHours, now = Date.now()) {
+  return getSessionExpiresAt(session, resetHours) <= now;
 }
 
 async function scheduleSessionResetAlarm() {
@@ -129,7 +199,7 @@ async function scheduleSessionResetAlarm() {
   const sessions = await getAllSessions();
   const nextExpiresAt = sessions
     .filter((entry) => config.enabled && isDomainTracked(entry.session.domain, config.sites))
-    .map((entry) => entry.session.expiresAt)
+    .map((entry) => getSessionExpiresAt(entry.session, config.resetHours))
     .filter((expiresAt) => typeof expiresAt === "number" && expiresAt > Date.now())
     .sort((a, b) => a - b)[0];
 
@@ -176,7 +246,7 @@ async function readPendingConfigChange() {
 async function schedulePendingConfigChange(pending) {
   if (!browser.alarms) return;
 
-  if (!pending) {
+  if (!pending || !pending.unlockAt) {
     await browser.alarms.clear(PENDING_CONFIG_CHANGE_ALARM);
     return;
   }
@@ -192,7 +262,8 @@ function describePendingConfigChange(pending) {
   }
 
   if (pending.type === "reduceDelay") {
-    return "Reducing delay to " + pending.delaySeconds + " seconds";
+    const unit = pending.delayMinutes === 1 ? "minute" : "minutes";
+    return "Reducing wait to " + pending.delayMinutes + " " + unit;
   }
 
   return "Updating settings";
@@ -208,12 +279,11 @@ async function startPendingConfigChange(change) {
 
   const config = await readConfig();
   const startedAt = Date.now();
-  const waitSeconds = clampDelaySeconds(config.delaySeconds);
+  const waitMinutes = clampDelayMinutes(config.delayMinutes);
   const pendingBase = {
     id: String(startedAt),
     startedAt: startedAt,
-    unlockAt: startedAt + waitSeconds * 1000,
-    waitSeconds: waitSeconds
+    waitMinutes: waitMinutes
   };
 
   let pending = null;
@@ -227,20 +297,22 @@ async function startPendingConfigChange(change) {
     pending = {
       ...pendingBase,
       type: "removeSite",
-      site: site
+      site: site,
+      remainingMs: waitMinutes * MINUTE_MS
     };
   } else if (change.type === "reduceDelay") {
-    const delaySeconds = clampDelaySeconds(change.delaySeconds);
+    const delayMinutes = clampDelayMinutes(change.delayMinutes || DEFAULT_CONFIG.delayMinutes);
 
-    if (delaySeconds >= config.delaySeconds) {
-      await browser.storage.local.set({ delaySeconds: delaySeconds });
+    if (delayMinutes >= config.delayMinutes) {
+      await browser.storage.local.set({ delayMinutes: delayMinutes });
       return { ok: true, applied: true, pending: null };
     }
 
     pending = {
       ...pendingBase,
       type: "reduceDelay",
-      delaySeconds: delaySeconds
+      unlockAt: startedAt + waitMinutes * MINUTE_MS,
+      delayMinutes: delayMinutes
     };
   } else {
     return { ok: false, reason: "unknown-change", pending: null };
@@ -251,6 +323,32 @@ async function startPendingConfigChange(change) {
   await schedulePendingConfigChange(pending);
 
   return { ok: true, applied: false, pending: pending };
+}
+
+async function advancePendingConfigChange(elapsedMs) {
+  const pending = await readPendingConfigChange();
+  if (!pending) return { ok: true, applied: false, pending: null };
+
+  if (pending.type !== "removeSite") {
+    const nextPending = await reconcilePendingConfigChange();
+    return { ok: true, applied: !nextPending, pending: nextPending };
+  }
+
+  const elapsed = Math.max(0, Math.min(parseInt(elapsedMs, 10) || 0, MINUTE_MS));
+  const remainingMs = Math.max(0, getPendingRemainingMs(pending) - elapsed);
+  const nextPending = {
+    ...pending,
+    remainingMs: remainingMs
+  };
+
+  if (remainingMs > 0) {
+    await browser.storage.local.set({ [PENDING_CONFIG_CHANGE_KEY]: nextPending });
+    await schedulePendingConfigChange(nextPending);
+    return { ok: true, applied: false, pending: nextPending };
+  }
+
+  await applyPendingConfigChange(nextPending);
+  return { ok: true, applied: true, pending: null };
 }
 
 async function cancelPendingConfigChange() {
@@ -266,7 +364,34 @@ async function reconcilePendingConfigChange() {
     return null;
   }
 
-  if (!pending.type || !pending.unlockAt) {
+  if (!pending.type) {
+    await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
+    await schedulePendingConfigChange(null);
+    return null;
+  }
+
+  if (pending.type === "removeSite") {
+    const remainingMs = getPendingRemainingMs(pending);
+    if (remainingMs > 0) {
+      if (pending.remainingMs !== remainingMs) {
+        const nextPending = {
+          ...pending,
+          remainingMs: remainingMs
+        };
+        await browser.storage.local.set({ [PENDING_CONFIG_CHANGE_KEY]: nextPending });
+        await schedulePendingConfigChange(nextPending);
+        return nextPending;
+      }
+
+      await schedulePendingConfigChange(pending);
+      return pending;
+    }
+
+    await applyPendingConfigChange(pending);
+    return null;
+  }
+
+  if (!pending.unlockAt) {
     await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
     await schedulePendingConfigChange(null);
     return null;
@@ -277,15 +402,33 @@ async function reconcilePendingConfigChange() {
     return pending;
   }
 
+  await applyPendingConfigChange(pending);
+  return null;
+}
+
+function getPendingRemainingMs(pending) {
+  if (typeof pending.remainingMs === "number") {
+    return Math.max(0, pending.remainingMs);
+  }
+
+  if (typeof pending.unlockAt === "number") {
+    return Math.max(0, pending.unlockAt - Date.now());
+  }
+
+  const waitMinutes = clampDelayMinutes(pending.waitMinutes || DEFAULT_CONFIG.delayMinutes);
+  return waitMinutes * MINUTE_MS;
+}
+
+async function applyPendingConfigChange(pending) {
   const config = await readConfig();
 
   if (pending.type === "removeSite") {
     const nextSites = config.sites.filter((site) => site !== pending.site);
     await browser.storage.local.set({ sites: nextSites });
   } else if (pending.type === "reduceDelay") {
-    const delaySeconds = clampDelaySeconds(pending.delaySeconds);
-    if (delaySeconds < config.delaySeconds && config.delaySeconds <= pending.waitSeconds) {
-      await browser.storage.local.set({ delaySeconds: delaySeconds });
+    const delayMinutes = clampDelayMinutes(pending.delayMinutes || DEFAULT_CONFIG.delayMinutes);
+    if (delayMinutes < config.delayMinutes && config.delayMinutes <= pending.waitMinutes) {
+      await browser.storage.local.set({ delayMinutes: delayMinutes });
     }
   }
 
@@ -293,8 +436,6 @@ async function reconcilePendingConfigChange() {
   await schedulePendingConfigChange(null);
   await scheduleSessionResetAlarm();
   await updateBadge();
-
-  return null;
 }
 
 async function reconcileExpiredSessions() {
@@ -305,30 +446,32 @@ async function reconcileExpiredSessions() {
   for (const { key, tabId, session } of sessions) {
     let currentSession = session;
 
-    if (!currentSession.expiresAt) {
+    if (!currentSession.createdAt || !currentSession.expiresAt) {
       const createdAt = currentSession.createdAt || now;
       currentSession = {
         ...currentSession,
         createdAt: createdAt,
-        expiresAt: createdAt + SESSION_RESET_MS
+        expiresAt: createdAt + config.resetHours * HOUR_MS
       };
       await browser.storage.session.set({ [key]: currentSession });
     }
 
-    if (!isSessionExpired(currentSession, now)) continue;
+    if (!isSessionExpired(currentSession, config.resetHours, now)) continue;
     if (!config.enabled || !isDomainTracked(currentSession.domain, config.sites)) continue;
 
-    const nextSession = createTimerSession(currentSession.domain, config.delaySeconds, now);
+    const nextSession = createTimerSession(
+      currentSession.domain,
+      config.delayMinutes,
+      config.resetHours,
+      now
+    );
     await browser.storage.session.set({ [key]: nextSession });
 
-    try {
-      await browser.tabs.sendMessage(tabId, {
-        type: "RESET_TIMER",
-        remainingMs: nextSession.remainingMs
-      });
-    } catch {
-      // Tab may not have an active content script. The next page load will read the reset session.
-    }
+    await sendTabMessage(tabId, {
+      type: "RESET_TIMER",
+      remainingMs: nextSession.remainingMs,
+      active: await isTabActiveAndFocused(tabId)
+    });
   }
 
   await scheduleSessionResetAlarm();
@@ -352,7 +495,7 @@ if (browser.alarms) {
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
 
-  if (changes.enabled || changes.sites || changes.delaySeconds) {
+  if (changes.enabled || changes.sites || changes.delayMinutes || changes.resetHours) {
     reconcileExpiredSessions().catch((error) => {
       console.warn("[Airlock] Failed to reconcile expired sessions:", error);
     });
@@ -375,19 +518,14 @@ browser.tabs.onActivated.addListener(async (activeInfo) => {
   currentActiveTabId = activeInfo.tabId;
 
   if (prevTabId !== null && prevTabId !== currentActiveTabId) {
-    try {
-      await browser.tabs.sendMessage(prevTabId, { type: "PAUSE" });
-    } catch {
-      // Tab may not have content script
-    }
+    await sendActiveState(prevTabId, false);
+    await sendTabMessage(prevTabId, { type: "PAUSE" });
   }
 
   if (windowFocused) {
-    try {
-      await browser.tabs.sendMessage(currentActiveTabId, { type: "RESUME" });
-    } catch {
-      // Tab may not have content script
-    }
+    const active = await isTabActiveAndFocused(currentActiveTabId);
+    await sendActiveState(currentActiveTabId, active);
+    await sendTabMessage(currentActiveTabId, { type: active ? "RESUME" : "PAUSE" });
   }
 });
 
@@ -400,17 +538,16 @@ browser.windows.onFocusChanged.addListener(async (windowId) => {
   await new Promise((r) => setTimeout(r, 150));
 
   if (!windowFocused && wasFocused) {
-    try {
-      await browser.tabs.sendMessage(currentActiveTabId, { type: "PAUSE" });
-    } catch {
-      // Tab may not have content script
-    }
+    await sendActiveState(currentActiveTabId, false);
+    await sendTabMessage(currentActiveTabId, { type: "PAUSE" });
   } else if (windowFocused && !wasFocused) {
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
       if (tab) {
         currentActiveTabId = tab.id;
-        await browser.tabs.sendMessage(currentActiveTabId, { type: "RESUME" });
+        const active = await isTabActiveAndFocused(currentActiveTabId);
+        await sendActiveState(currentActiveTabId, active);
+        await sendTabMessage(currentActiveTabId, { type: active ? "RESUME" : "PAUSE" });
       }
     } catch {
       // Ignore
@@ -442,8 +579,20 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "ADVANCE_PENDING_CONFIG_CHANGE") {
+    advancePendingConfigChange(message.elapsedMs).then(sendResponse);
+    return true;
+  }
+
   if (!sender.tab) return;
   const tabId = sender.tab.id;
+
+  if (message.type === "GET_ACTIVE_STATE") {
+    isTabActiveAndFocused(tabId).then((active) => {
+      sendResponse({ active: active });
+    });
+    return true;
+  }
 
   if (message.type === "CONTENT_READY") {
     handleContentReady(tabId, message.domain).then((response) => {
@@ -464,54 +613,60 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleContentReady(tabId, domain) {
   const config = await getConfig();
+  const active = await isTabActiveAndFocused(tabId);
 
   if (!config.enabled || !isDomainTracked(domain, config.sites)) {
-    return { type: "NO_OVERLAY" };
+    return { type: "NO_OVERLAY", active: active };
   }
 
   let session = await getSession(tabId);
   const now = Date.now();
 
   if (session && session.domain === domain) {
-    if (!session.expiresAt) {
+    if (!session.createdAt || !session.expiresAt) {
       const createdAt = session.createdAt || now;
       session = {
         ...session,
         createdAt: createdAt,
-        expiresAt: createdAt + SESSION_RESET_MS
+        expiresAt: createdAt + config.resetHours * HOUR_MS
       };
       await setSession(tabId, session);
     }
 
-    if (isSessionExpired(session, now)) {
-      const nextSession = createTimerSession(domain, config.delaySeconds, now);
+    const resetAt = getSessionExpiresAt(session, config.resetHours);
+
+    if (isSessionExpired(session, config.resetHours, now)) {
+      const nextSession = createTimerSession(domain, config.delayMinutes, config.resetHours, now);
       await setSession(tabId, nextSession);
       return {
         type: "SHOW_OVERLAY",
         remainingMs: nextSession.remainingMs,
-        resetAt: nextSession.expiresAt
+        resetAt: nextSession.expiresAt,
+        active: active
       };
     }
 
     if (session.completed) {
-      return { type: "NO_OVERLAY", resetAt: session.expiresAt };
+      return { type: "NO_OVERLAY", resetAt: resetAt, active: active };
     }
     if (session.remainingMs <= 0) {
-      return { type: "NO_OVERLAY", resetAt: session.expiresAt };
+      return { type: "NO_OVERLAY", resetAt: resetAt, active: active };
     }
     return {
       type: "SHOW_OVERLAY",
       remainingMs: session.remainingMs,
-      resetAt: session.expiresAt
+      resetAt: resetAt,
+      active: active
     };
   }
 
-  const nextSession = createTimerSession(domain, config.delaySeconds, now);
+  const nextSession = createTimerSession(domain, config.delayMinutes, config.resetHours, now);
   await setSession(tabId, nextSession);
   return {
     type: "SHOW_OVERLAY",
     remainingMs: nextSession.remainingMs,
-    resetAt: nextSession.expiresAt
+    resetAt: nextSession.expiresAt,
+    active: active
   };
 }
 
