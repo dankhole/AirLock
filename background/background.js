@@ -337,7 +337,7 @@ async function startPendingConfigChange(change) {
     pending = {
       ...pendingBase,
       type: "reduceDelay",
-      unlockAt: startedAt + waitMinutes * MINUTE_MS,
+      remainingMs: waitMinutes * MINUTE_MS,
       delayMinutes: delayMinutes
     };
   } else if (change.type === "disableHoverTarget") {
@@ -349,7 +349,7 @@ async function startPendingConfigChange(change) {
     pending = {
       ...pendingBase,
       type: "disableHoverTarget",
-      unlockAt: startedAt + waitMinutes * MINUTE_MS
+      remainingMs: waitMinutes * MINUTE_MS
     };
   } else {
     return { ok: false, reason: "unknown-change", pending: null };
@@ -366,11 +366,6 @@ async function advancePendingConfigChange(elapsedMs) {
   const pending = await readPendingConfigChange();
   if (!pending) return { ok: true, applied: false, pending: null };
 
-  if (pending.type !== "removeSite") {
-    const nextPending = await reconcilePendingConfigChange();
-    return { ok: true, applied: !nextPending, pending: nextPending };
-  }
-
   const elapsed = Math.max(0, Math.min(parseInt(elapsedMs, 10) || 0, MINUTE_MS));
   const remainingMs = Math.max(0, getPendingRemainingMs(pending) - elapsed);
   const nextPending = {
@@ -380,7 +375,9 @@ async function advancePendingConfigChange(elapsedMs) {
 
   if (remainingMs > 0) {
     await browser.storage.local.set({ [PENDING_CONFIG_CHANGE_KEY]: nextPending });
-    await schedulePendingConfigChange(nextPending);
+    if (typeof nextPending.unlockAt === "number") {
+      await schedulePendingConfigChange(nextPending);
+    }
     return { ok: true, applied: false, pending: nextPending };
   }
 
@@ -407,7 +404,7 @@ async function reconcilePendingConfigChange() {
     return null;
   }
 
-  if (pending.type === "removeSite") {
+  if (typeof pending.remainingMs === "number") {
     const remainingMs = getPendingRemainingMs(pending);
     if (remainingMs > 0) {
       if (pending.remainingMs !== remainingMs) {

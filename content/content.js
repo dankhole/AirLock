@@ -42,6 +42,7 @@
     ? response.requireHoverTarget === true
     : config.requireHoverTarget === true;
   let hoverTargetEngaged = false;
+  let hoverTargetPointerInside = false;
   let hoverTargetPressed = false;
   let running = false;
   let lastTick = Date.now();
@@ -55,6 +56,10 @@
   let continueBtn = null;
   let backdrop = null;
   let hoverTarget = null;
+  let lastTimerText = null;
+  let lastPausedLabelText = null;
+  let lastTimerPaused = null;
+  let lastContinueVisible = null;
 
   // --- Create Overlay ---
 
@@ -97,21 +102,35 @@
           gap: 32px;
           user-select: none;
         }
+        .hover-target {
+          width: 168px;
+          height: 168px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          position: relative;
+          border-radius: 50%;
+          touch-action: none;
+        }
+        .hover-target.hover-target-required {
+          cursor: pointer;
+        }
         .breathing-circle {
           width: 120px;
           height: 120px;
-          position: relative;
+          flex: 0 0 auto;
+          pointer-events: none;
           border-radius: 50%;
           background: radial-gradient(circle, rgba(91, 141, 239, 0.4), rgba(91, 141, 239, 0.1));
           border: 2px solid rgba(91, 141, 239, 0.3);
           animation: breathe 8s ease-in-out infinite;
           transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+          will-change: transform, opacity;
         }
-        .breathing-circle.hover-target-required {
-          cursor: pointer;
+        .hover-target.hover-target-required .breathing-circle {
           box-shadow: 0 0 0 8px rgba(255, 255, 255, 0.08);
         }
-        .breathing-circle.hover-target-active {
+        .hover-target.hover-target-active .breathing-circle {
           background: radial-gradient(circle, rgba(91, 141, 239, 0.65), rgba(91, 141, 239, 0.22));
           border-color: rgba(255, 255, 255, 0.72);
           box-shadow: 0 0 0 10px rgba(91, 141, 239, 0.22);
@@ -163,7 +182,9 @@
       </style>
       <div class="backdrop">
         <div class="card">
-          <div class="breathing-circle" id="hover-target" title="Hover to run timer"></div>
+          <div class="hover-target" id="hover-target" title="Hover to run timer">
+            <div class="breathing-circle"></div>
+          </div>
           <div class="message">Take a moment...</div>
           <div class="timer" id="timer-display">0:00</div>
           <div class="paused-label" id="paused-label"></div>
@@ -181,11 +202,29 @@
     continueBtn = shadowRoot.getElementById("continue-btn");
     hoverTarget = shadowRoot.getElementById("hover-target");
     continueBtn.addEventListener("click", () => dismissOverlay());
-    hoverTarget.addEventListener("pointerenter", () => refreshHoverTargetGate());
-    hoverTarget.addEventListener("pointerleave", () => refreshHoverTargetGate());
-    hoverTarget.addEventListener("pointerdown", () => setHoverTargetPressed(true));
-    hoverTarget.addEventListener("pointerup", () => setHoverTargetPressed(false));
-    hoverTarget.addEventListener("pointercancel", () => setHoverTargetPressed(false));
+    hoverTarget.addEventListener("pointerenter", (event) => {
+      setHoverTargetPointerInside(event.pointerType !== "touch");
+    });
+    hoverTarget.addEventListener("pointermove", (event) => {
+      setHoverTargetPointerInside(event.pointerType !== "touch");
+    });
+    hoverTarget.addEventListener("pointerleave", resetHoverTargetGate);
+    hoverTarget.addEventListener("pointerdown", (event) => {
+      if (event.pointerType !== "mouse" && typeof hoverTarget.setPointerCapture === "function") {
+        try {
+          hoverTarget.setPointerCapture(event.pointerId);
+        } catch {
+          // Pointer capture is best-effort for touch press-and-hold.
+        }
+      }
+      setHoverTargetPressed(true);
+    });
+    hoverTarget.addEventListener("pointerup", (event) => {
+      setHoverTargetPressed(false);
+      if (event.pointerType === "touch") setHoverTargetPointerInside(false);
+    });
+    hoverTarget.addEventListener("pointercancel", resetHoverTargetGate);
+    hoverTarget.addEventListener("lostpointercapture", () => setHoverTargetPressed(false));
 
     updateHoverTargetState();
     updateDisplay();
@@ -206,19 +245,42 @@
   function updateDisplay() {
     if (!timerEl) return;
 
-    timerEl.textContent = formatTime(remainingMs);
+    const timerText = formatTime(remainingMs);
+    if (lastTimerText !== timerText) {
+      lastTimerText = timerText;
+      timerEl.textContent = timerText;
+    }
+
+    const paused = remainingMs > 0 && !running;
+    if (lastTimerPaused !== paused) {
+      lastTimerPaused = paused;
+      timerEl.classList.toggle("paused", paused);
+    }
 
     if (remainingMs <= 0) {
-      timerEl.classList.remove("paused");
-      pausedLabel.textContent = "";
-      continueBtn.classList.add("visible");
+      setPausedLabelText("");
+      setContinueVisible(true);
     } else if (!running) {
-      timerEl.classList.add("paused");
-      pausedLabel.textContent = getPausedLabel();
+      setPausedLabelText(getPausedLabel());
+      setContinueVisible(false);
     } else {
-      timerEl.classList.remove("paused");
-      pausedLabel.textContent = "";
+      setPausedLabelText("");
+      setContinueVisible(false);
     }
+  }
+
+  function setPausedLabelText(text) {
+    if (lastPausedLabelText === text) return;
+
+    lastPausedLabelText = text;
+    pausedLabel.textContent = text;
+  }
+
+  function setContinueVisible(visible) {
+    if (lastContinueVisible === visible) return;
+
+    lastContinueVisible = visible;
+    continueBtn.classList.toggle("visible", visible);
   }
 
   function getPausedLabel() {
@@ -267,6 +329,10 @@
     continueBtn = null;
     backdrop = null;
     hoverTarget = null;
+    lastTimerText = null;
+    lastPausedLabelText = null;
+    lastTimerPaused = null;
+    lastContinueVisible = null;
   }
 
   function showOverlay(nextRemainingMs, active = backgroundActive) {
@@ -297,25 +363,7 @@
     return document.visibilityState === "visible" && !document.hidden && document.hasFocus();
   }
 
-  function syncHoverTargetEngagement() {
-    if (!requireHoverTarget) {
-      hoverTargetEngaged = false;
-      hoverTargetPressed = false;
-      updateHoverTargetState();
-      return;
-    }
-
-    if (!hoverTarget || typeof hoverTarget.matches !== "function") return;
-
-    const nextEngaged = hoverTarget.matches(":hover") || hoverTargetPressed;
-    if (hoverTargetEngaged === nextEngaged) return;
-
-    hoverTargetEngaged = nextEngaged;
-    updateHoverTargetState();
-  }
-
   function isHoverTargetSatisfied() {
-    syncHoverTargetEngagement();
     return !requireHoverTarget || hoverTargetEngaged;
   }
 
@@ -336,15 +384,37 @@
     hoverTarget.classList.toggle("hover-target-active", requireHoverTarget && hoverTargetEngaged);
   }
 
-  function refreshHoverTargetGate() {
-    syncHoverTargetEngagement();
+  function updateHoverTargetGate() {
+    const nextEngaged = requireHoverTarget && (hoverTargetPointerInside || hoverTargetPressed);
+    if (hoverTargetEngaged !== nextEngaged) {
+      hoverTargetEngaged = nextEngaged;
+      updateHoverTargetState();
+    }
+
     setRunning(canRunTimer(), { persistPaused: true });
     updateDisplay();
   }
 
+  function setHoverTargetPointerInside(nextInside) {
+    const normalized = requireHoverTarget && nextInside === true;
+    if (hoverTargetPointerInside === normalized) return;
+
+    hoverTargetPointerInside = normalized;
+    updateHoverTargetGate();
+  }
+
   function setHoverTargetPressed(nextPressed) {
-    hoverTargetPressed = requireHoverTarget && nextPressed === true;
-    refreshHoverTargetGate();
+    const normalized = requireHoverTarget && nextPressed === true;
+    if (hoverTargetPressed === normalized) return;
+
+    hoverTargetPressed = normalized;
+    updateHoverTargetGate();
+  }
+
+  function resetHoverTargetGate() {
+    hoverTargetPointerInside = false;
+    hoverTargetPressed = false;
+    updateHoverTargetGate();
   }
 
   function setRequireHoverTarget(nextRequired) {
@@ -354,7 +424,10 @@
     requireHoverTarget = normalized;
     if (!requireHoverTarget) {
       hoverTargetEngaged = false;
+      hoverTargetPointerInside = false;
       hoverTargetPressed = false;
+    } else {
+      hoverTargetEngaged = hoverTargetPointerInside || hoverTargetPressed;
     }
     updateHoverTargetState();
     setRunning(canRunTimer(), { persistPaused: true });
@@ -424,6 +497,12 @@
 
   function setBackgroundActive(active) {
     backgroundActive = active === true;
+    if (!backgroundActive) {
+      hoverTargetEngaged = false;
+      hoverTargetPointerInside = false;
+      hoverTargetPressed = false;
+      updateHoverTargetState();
+    }
     setRunning(canRunTimer(), { persistPaused: true });
   }
 
@@ -474,14 +553,17 @@
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
-      setHoverTargetPressed(false);
+      resetHoverTargetGate();
       pauseTimer();
     } else {
       resumeTimer();
     }
   });
 
-  window.addEventListener("blur", () => pauseTimer());
+  window.addEventListener("blur", () => {
+    resetHoverTargetGate();
+    pauseTimer();
+  });
   window.addEventListener("focus", () => resumeTimer());
 
   browser.runtime.onMessage.addListener((message) => {

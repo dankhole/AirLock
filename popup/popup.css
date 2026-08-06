@@ -158,6 +158,50 @@ body {
   line-height: 1.2;
 }
 
+.pending-config-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pending-config-hover-target {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #fdba74;
+  border-radius: 50%;
+  background: white;
+  cursor: pointer;
+  touch-action: none;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.pending-config-hover-target[hidden] {
+  display: none;
+}
+
+.pending-config-hover-target span {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fb923c;
+  transition: transform 0.15s, background 0.15s;
+}
+
+.pending-config-hover-target.active {
+  border-color: #f97316;
+  background: #ffedd5;
+  box-shadow: 0 0 0 3px rgba(251, 146, 60, 0.22);
+}
+
+.pending-config-hover-target.active span {
+  background: #ea580c;
+  transform: scale(1.12);
+}
+
 .pending-config-cancel {
   flex: 0 0 auto;
   padding: 6px 10px;

@@ -14,10 +14,10 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 8. Navigating within a site after completing the timer does not re-trigger it until the configured reset window passes
 9. A tracked tab left open past the configured reset window requires a fresh wait
 10. Removing a tracked site or lowering the wait duration waits for the current wait duration before applying
-11. Site-removal waits only count down while the settings popup is open
+11. Guarded settings waits only count down while the settings popup is open and the settings hover target is active
 
 Adding tracked sites and increasing the delay still apply immediately.
-Turning on hover-target enforcement applies immediately; turning it off waits for the current wait duration before applying.
+Increasing time settings and turning on hover-target enforcement require confirmation. Turning off hover-target enforcement waits for the current wait duration before applying.
 
 Domain matching: entering `reddit.com` will match `reddit.com`, `www.reddit.com`, `old.reddit.com`, etc.
 
@@ -40,9 +40,9 @@ For official Firefox uploads, package the authored source files directly instead
 
 ```sh
 mkdir -p store
-rm -f store/firefox-addon-1.0.3.zip
-zip -j store/firefox-addon-1.0.3.zip firefox/manifest.json
-zip -r store/firefox-addon-1.0.3.zip background content popup icons -x '*.DS_Store'
+rm -f store/firefox-addon-1.0.4.zip
+zip -j store/firefox-addon-1.0.4.zip firefox/manifest.json
+zip -r store/firefox-addon-1.0.4.zip background content popup icons -x '*.DS_Store'
 ```
 
 This keeps the submitted Firefox package free of generated extension files. The AMO generated-code question can be answered "No" when using this package.
@@ -74,12 +74,13 @@ After making source changes, run `npm run build` and reload the extension.
 - Minimize the browser -- timer pauses
 - Restore -- timer resumes
 - Enable hover target -- timer only runs while hovering the circle
+- Start a guarded settings change -- countdown only runs while hovering the popup target
 
 ### Persistence
 - Refresh during countdown -- timer resumes, not reset
 - Open the same site in a new tab -- fresh timer
 - Leave a completed tracked tab open past the configured reset window -- timer resets and appears again
-- Close and reopen the popup during a site-removal wait -- remaining time is preserved
+- Close and reopen the popup during a guarded settings wait -- remaining time is preserved
 - Toggle extension off while overlay is active -- overlay removed
 
 ## Architecture

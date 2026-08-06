@@ -12,6 +12,7 @@ const addSiteBtn = document.getElementById("add-site-btn");
 const pendingConfigSection = document.getElementById("pending-config-section");
 const pendingConfigTitle = document.getElementById("pending-config-title");
 const pendingConfigTimer = document.getElementById("pending-config-timer");
+const pendingConfigHoverTarget = document.getElementById("pending-config-hover-target");
 const pendingConfigCancel = document.getElementById("pending-config-cancel");
 
 let sites = [];
@@ -23,8 +24,10 @@ let pendingRemove = null;
 let pendingConfigChange = null;
 let pendingConfigInterval = null;
 let pendingConfigTickAt = null;
+let pendingConfigHoverActive = false;
 let pendingConfigAdvanceInFlight = false;
 let pendingConfigRefreshInFlight = false;
+let pendingConfigTimerText = null;
 
 // --- Load config from storage ---
 
@@ -89,6 +92,11 @@ delayInput.addEventListener("change", () => {
     return;
   }
 
+  if (val > delayMinutes && !confirmSettingIncrease("wait", delayMinutes, val, "minute")) {
+    delayInput.value = delayMinutes;
+    return;
+  }
+
   if (val >= delayMinutes) {
     delayMinutes = val;
     delayInput.value = delayMinutes;
@@ -111,6 +119,11 @@ resetInput.addEventListener("change", () => {
     return;
   }
 
+  if (val > resetHours && !confirmSettingIncrease("reset window", resetHours, val, "hour")) {
+    resetInput.value = resetHours;
+    return;
+  }
+
   resetHours = val;
   resetInput.value = resetHours;
   browser.storage.local.set({ resetHours: resetHours });
@@ -127,6 +140,11 @@ hoverTargetToggle.addEventListener("change", () => {
   }
 
   if (nextRequireHoverTarget) {
+    if (!window.confirm("Turn on hover target? The timer will only count down while the pointer is on the overlay target.")) {
+      hoverTargetToggle.checked = requireHoverTarget;
+      return;
+    }
+
     requireHoverTarget = true;
     hoverTargetToggle.checked = true;
     browser.storage.local.set({ requireHoverTarget: true });
@@ -244,6 +262,27 @@ pendingConfigCancel.addEventListener("click", () => {
   });
 });
 
+pendingConfigHoverTarget.addEventListener("pointerenter", (event) => {
+  setPendingConfigHoverActive(event.pointerType !== "touch");
+});
+pendingConfigHoverTarget.addEventListener("pointermove", (event) => {
+  setPendingConfigHoverActive(event.pointerType !== "touch");
+});
+pendingConfigHoverTarget.addEventListener("pointerleave", () => setPendingConfigHoverActive(false));
+pendingConfigHoverTarget.addEventListener("pointerdown", (event) => {
+  if (event.pointerType !== "mouse" && typeof pendingConfigHoverTarget.setPointerCapture === "function") {
+    try {
+      pendingConfigHoverTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort for touch press-and-hold.
+    }
+  }
+  setPendingConfigHoverActive(true);
+});
+pendingConfigHoverTarget.addEventListener("pointerup", () => setPendingConfigHoverActive(false));
+pendingConfigHoverTarget.addEventListener("pointercancel", () => setPendingConfigHoverActive(false));
+pendingConfigHoverTarget.addEventListener("lostpointercapture", () => setPendingConfigHoverActive(false));
+
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
 
@@ -272,7 +311,18 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   }
 
   if (changes.pendingConfigChange) {
-    pendingConfigChange = changes.pendingConfigChange.newValue || null;
+    const nextPendingConfigChange = changes.pendingConfigChange.newValue || null;
+    if (
+      pendingConfigAdvanceInFlight &&
+      nextPendingConfigChange &&
+      pendingConfigChange &&
+      nextPendingConfigChange.id === pendingConfigChange.id
+    ) {
+      pendingConfigChange = nextPendingConfigChange;
+      return;
+    }
+
+    pendingConfigChange = nextPendingConfigChange;
     renderPendingConfigChange();
     renderSites();
   }
@@ -290,6 +340,24 @@ function normalizeResetHours(value) {
   if (isNaN(hours) || hours < 1) hours = 1;
   if (hours > 8760) hours = 8760;
   return hours;
+}
+
+function confirmSettingIncrease(label, currentValue, nextValue, unit) {
+  const currentUnit = currentValue === 1 ? unit : unit + "s";
+  const nextUnit = nextValue === 1 ? unit : unit + "s";
+  return window.confirm(
+    "Increase " +
+      label +
+      " from " +
+      currentValue +
+      " " +
+      currentUnit +
+      " to " +
+      nextValue +
+      " " +
+      nextUnit +
+      "?"
+  );
 }
 
 function formatTime(ms) {
@@ -319,12 +387,15 @@ function renderPendingConfigChange() {
     pendingConfigInterval = null;
   }
   pendingConfigTickAt = null;
+  pendingConfigHoverActive = false;
   pendingConfigAdvanceInFlight = false;
+  pendingConfigTimerText = null;
+  updatePendingConfigHoverTarget();
 
   if (!pendingConfigChange) {
     pendingConfigSection.hidden = true;
     pendingConfigTitle.textContent = "";
-    pendingConfigTimer.textContent = "0:00";
+    setPendingConfigTimerText(0);
     setControlsLocked(false);
     return;
   }
@@ -334,6 +405,7 @@ function renderPendingConfigChange() {
   pendingConfigTitle.textContent = pendingConfigChange.description || getPendingConfigTitle(pendingConfigChange);
   setControlsLocked(true);
   pendingConfigTickAt = Date.now();
+  updatePendingConfigHoverTarget();
   updatePendingConfigTimer();
   pendingConfigInterval = setInterval(updatePendingConfigTimer, 250);
 }
@@ -359,10 +431,12 @@ function updatePendingConfigTimer() {
   if (!pendingConfigChange) return;
 
   const remainingMs = getPendingConfigRemainingMs();
-  pendingConfigTimer.textContent = formatTime(remainingMs);
+  setPendingConfigTimerText(remainingMs);
 
-  if (pendingConfigChange.type === "removeSite") {
-    advanceRemoveSitePendingChange(remainingMs);
+  if (isPendingConfigHoverGated()) {
+    if (pendingConfigHoverActive) {
+      advancePendingConfigChangeCountdown(remainingMs);
+    }
     return;
   }
 
@@ -375,17 +449,55 @@ function updatePendingConfigTimer() {
 }
 
 function getPendingConfigRemainingMs() {
-  if (pendingConfigChange.type === "removeSite") {
+  if (typeof pendingConfigChange.remainingMs === "number") {
     const tickAt = pendingConfigTickAt || Date.now();
-    const elapsedMs = Math.max(0, Date.now() - tickAt);
+    const elapsedMs = pendingConfigHoverActive ? Math.max(0, Date.now() - tickAt) : 0;
     return Math.max(0, (pendingConfigChange.remainingMs || 0) - elapsedMs);
   }
 
-  return Math.max(0, pendingConfigChange.unlockAt - Date.now());
+  if (typeof pendingConfigChange.unlockAt === "number") {
+    return Math.max(0, pendingConfigChange.unlockAt - Date.now());
+  }
+
+  return 0;
 }
 
-function advanceRemoveSitePendingChange(remainingMs) {
-  if (pendingConfigAdvanceInFlight || !pendingConfigTickAt) return;
+function isPendingConfigHoverGated() {
+  return Boolean(pendingConfigChange && typeof pendingConfigChange.remainingMs === "number");
+}
+
+function setPendingConfigTimerText(ms) {
+  const nextText = formatTime(ms);
+  if (pendingConfigTimerText === nextText) return;
+
+  pendingConfigTimerText = nextText;
+  pendingConfigTimer.textContent = nextText;
+}
+
+function updatePendingConfigHoverTarget() {
+  if (!pendingConfigHoverTarget) return;
+
+  const hoverGated = isPendingConfigHoverGated();
+  pendingConfigHoverTarget.hidden = !hoverGated;
+  pendingConfigHoverTarget.classList.toggle("active", hoverGated && pendingConfigHoverActive);
+}
+
+function setPendingConfigHoverActive(active) {
+  const nextActive = isPendingConfigHoverGated() && active === true;
+  if (pendingConfigHoverActive === nextActive) return;
+
+  if (!nextActive) {
+    flushPendingConfigChange();
+  }
+
+  pendingConfigHoverActive = nextActive;
+  pendingConfigTickAt = Date.now();
+  updatePendingConfigHoverTarget();
+  updatePendingConfigTimer();
+}
+
+function advancePendingConfigChangeCountdown(remainingMs) {
+  if (pendingConfigAdvanceInFlight || !pendingConfigHoverActive || !pendingConfigTickAt) return;
 
   const now = Date.now();
   const elapsedMs = Math.max(0, now - pendingConfigTickAt);
@@ -411,7 +523,7 @@ function advanceRemoveSitePendingChange(remainingMs) {
       }
 
       pendingConfigTickAt = Date.now();
-      pendingConfigTimer.textContent = formatTime(getPendingConfigRemainingMs());
+      setPendingConfigTimerText(getPendingConfigRemainingMs());
     })
     .catch(() => {
       // Background may be unavailable while the popup is closing.
@@ -421,14 +533,21 @@ function advanceRemoveSitePendingChange(remainingMs) {
     });
 }
 
-function flushRemoveSitePendingChange() {
-  if (!pendingConfigChange || pendingConfigChange.type !== "removeSite" || !pendingConfigTickAt) return;
+function flushPendingConfigChange() {
+  if (!isPendingConfigHoverGated() || !pendingConfigHoverActive || !pendingConfigTickAt) return;
 
   const now = Date.now();
   const elapsedMs = Math.max(0, now - pendingConfigTickAt);
   if (elapsedMs <= 0) return;
 
+  const remainingMs = Math.max(0, (pendingConfigChange.remainingMs || 0) - elapsedMs);
+  pendingConfigChange = {
+    ...pendingConfigChange,
+    remainingMs: remainingMs
+  };
   pendingConfigTickAt = now;
+  setPendingConfigTimerText(remainingMs);
+
   try {
     const request = browser.runtime.sendMessage({
       type: "ADVANCE_PENDING_CONFIG_CHANGE",
@@ -468,8 +587,8 @@ function startPendingConfigChange(change) {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") {
-    flushRemoveSitePendingChange();
+    flushPendingConfigChange();
   }
 });
 
-window.addEventListener("pagehide", flushRemoveSitePendingChange);
+window.addEventListener("pagehide", flushPendingConfigChange);
