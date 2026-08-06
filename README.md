@@ -4,10 +4,10 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 
 ## How It Works
 
-1. You configure a list of websites, a wait duration in minutes, and a reset window in hours via the popup
+1. You configure a list of websites, a wait duration in minutes, a reset window in hours, and optional hover-target enforcement via the popup
 2. When any tab navigates to a tracked site, a fullscreen overlay appears with a countdown timer and breathing animation
 3. The timer **pauses** when you switch tabs, switch windows, or minimize the browser
-4. The timer **resumes** when you return to the tab
+4. The timer **resumes** when you return to the tab, and optionally only while the pointer is on the overlay target
 5. When the countdown reaches zero, a "Continue" button appears to dismiss the overlay
 6. Refreshing the page resumes the existing timer (doesn't reset it)
 7. Opening a new tab to the same site starts a fresh timer
@@ -17,6 +17,7 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 11. Site-removal waits only count down while the settings popup is open
 
 Adding tracked sites and increasing the delay still apply immediately.
+Turning on hover-target enforcement applies immediately; turning it off waits for the current wait duration before applying.
 
 Domain matching: entering `reddit.com` will match `reddit.com`, `www.reddit.com`, `old.reddit.com`, etc.
 
@@ -39,9 +40,9 @@ For official Firefox uploads, package the authored source files directly instead
 
 ```sh
 mkdir -p store
-rm -f store/firefox-addon-1.0.1.zip
-zip -j store/firefox-addon-1.0.1.zip firefox/manifest.json
-zip -r store/firefox-addon-1.0.1.zip background content popup icons -x '*.DS_Store'
+rm -f store/firefox-addon-1.0.3.zip
+zip -j store/firefox-addon-1.0.3.zip firefox/manifest.json
+zip -r store/firefox-addon-1.0.3.zip background content popup icons -x '*.DS_Store'
 ```
 
 This keeps the submitted Firefox package free of generated extension files. The AMO generated-code question can be answered "No" when using this package.
@@ -72,6 +73,7 @@ After making source changes, run `npm run build` and reload the extension.
 - Switch back -- timer resumes
 - Minimize the browser -- timer pauses
 - Restore -- timer resumes
+- Enable hover target -- timer only runs while hovering the circle
 
 ### Persistence
 - Refresh during countdown -- timer resumes, not reset

@@ -3,6 +3,7 @@
 const enabledToggle = document.getElementById("enabled-toggle");
 const delayInput = document.getElementById("delay-input");
 const resetInput = document.getElementById("reset-input");
+const hoverTargetToggle = document.getElementById("hover-target-toggle");
 const siteList = document.getElementById("site-list");
 const addSiteForm = document.getElementById("add-site-form");
 const siteInput = document.getElementById("site-input");
@@ -16,6 +17,7 @@ const pendingConfigCancel = document.getElementById("pending-config-cancel");
 let sites = [];
 let delayMinutes = 1;
 let resetHours = 24;
+let requireHoverTarget = false;
 let currentDomain = null;
 let pendingRemove = null;
 let pendingConfigChange = null;
@@ -26,13 +28,21 @@ let pendingConfigRefreshInFlight = false;
 
 // --- Load config from storage ---
 
-browser.storage.local.get(["enabled", "sites", "delayMinutes", "resetHours"]).then((result) => {
+browser.storage.local.get([
+  "enabled",
+  "sites",
+  "delayMinutes",
+  "resetHours",
+  "requireHoverTarget"
+]).then((result) => {
   enabledToggle.checked = result.enabled !== false;
 
   delayMinutes = normalizeDelayMinutes(result.delayMinutes || 1);
   resetHours = normalizeResetHours(result.resetHours || 24);
+  requireHoverTarget = result.requireHoverTarget === true;
   delayInput.value = delayMinutes;
   resetInput.value = resetHours;
+  hoverTargetToggle.checked = requireHoverTarget;
 
   sites = result.sites || [];
   renderSites();
@@ -104,6 +114,29 @@ resetInput.addEventListener("change", () => {
   resetHours = val;
   resetInput.value = resetHours;
   browser.storage.local.set({ resetHours: resetHours });
+});
+
+// --- Hover Target ---
+
+hoverTargetToggle.addEventListener("change", () => {
+  const nextRequireHoverTarget = hoverTargetToggle.checked === true;
+
+  if (pendingConfigChange) {
+    hoverTargetToggle.checked = requireHoverTarget;
+    return;
+  }
+
+  if (nextRequireHoverTarget) {
+    requireHoverTarget = true;
+    hoverTargetToggle.checked = true;
+    browser.storage.local.set({ requireHoverTarget: true });
+    return;
+  }
+
+  hoverTargetToggle.checked = requireHoverTarget;
+  startPendingConfigChange({
+    type: "disableHoverTarget"
+  });
 });
 
 // --- Site List ---
@@ -228,6 +261,11 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     resetInput.value = resetHours;
   }
 
+  if (changes.requireHoverTarget) {
+    requireHoverTarget = changes.requireHoverTarget.newValue === true;
+    hoverTargetToggle.checked = requireHoverTarget;
+  }
+
   if (changes.sites) {
     sites = changes.sites.newValue || [];
     renderSites();
@@ -265,6 +303,7 @@ function setControlsLocked(locked) {
   enabledToggle.disabled = locked;
   delayInput.disabled = locked;
   resetInput.disabled = locked;
+  hoverTargetToggle.disabled = locked;
   siteInput.disabled = locked;
   addSiteBtn.disabled = locked;
   addCurrentBtn.disabled = locked;
@@ -307,6 +346,10 @@ function getPendingConfigTitle(pending) {
   if (pending.type === "reduceDelay") {
     const unit = pending.delayMinutes === 1 ? "minute" : "minutes";
     return "Reducing wait to " + pending.delayMinutes + " " + unit;
+  }
+
+  if (pending.type === "disableHoverTarget") {
+    return "Disabling hover target";
   }
 
   return "Updating settings";

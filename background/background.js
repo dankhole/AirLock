@@ -5,7 +5,8 @@ const DEFAULT_CONFIG = {
   enabled: true,
   sites: [],
   delayMinutes: 1,
-  resetHours: 24
+  resetHours: 24,
+  requireHoverTarget: false
 };
 
 const PENDING_CONFIG_CHANGE_KEY = "pendingConfigChange";
@@ -50,7 +51,8 @@ async function migrateStoredConfig() {
     "sites",
     "delayMinutes",
     "delaySeconds",
-    "resetHours"
+    "resetHours",
+    "requireHoverTarget"
   ]);
   const updates = {};
 
@@ -71,6 +73,15 @@ async function migrateStoredConfig() {
     if (resetHours !== existing.resetHours) updates.resetHours = resetHours;
   }
 
+  if (existing.requireHoverTarget === undefined) {
+    updates.requireHoverTarget = DEFAULT_CONFIG.requireHoverTarget;
+  } else {
+    const requireHoverTarget = normalizeRequireHoverTarget(existing.requireHoverTarget);
+    if (requireHoverTarget !== existing.requireHoverTarget) {
+      updates.requireHoverTarget = requireHoverTarget;
+    }
+  }
+
   if (Object.keys(updates).length > 0) {
     await browser.storage.local.set(updates);
   }
@@ -81,12 +92,19 @@ async function migrateStoredConfig() {
 }
 
 async function readConfig() {
-  const result = await browser.storage.local.get(["enabled", "sites", "delayMinutes", "resetHours"]);
+  const result = await browser.storage.local.get([
+    "enabled",
+    "sites",
+    "delayMinutes",
+    "resetHours",
+    "requireHoverTarget"
+  ]);
   return {
     enabled: result.enabled !== false,
     sites: result.sites || [],
     delayMinutes: clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes),
-    resetHours: clampResetHours(result.resetHours || DEFAULT_CONFIG.resetHours)
+    resetHours: clampResetHours(result.resetHours || DEFAULT_CONFIG.resetHours),
+    requireHoverTarget: normalizeRequireHoverTarget(result.requireHoverTarget)
   };
 }
 
@@ -111,6 +129,10 @@ function clampResetHours(value) {
   if (isNaN(hours) || hours < 1) hours = 1;
   if (hours > 8760) hours = 8760;
   return hours;
+}
+
+function normalizeRequireHoverTarget(value) {
+  return value === true;
 }
 
 async function getSession(tabId) {
@@ -266,6 +288,10 @@ function describePendingConfigChange(pending) {
     return "Reducing wait to " + pending.delayMinutes + " " + unit;
   }
 
+  if (pending.type === "disableHoverTarget") {
+    return "Disabling hover target";
+  }
+
   return "Updating settings";
 }
 
@@ -313,6 +339,17 @@ async function startPendingConfigChange(change) {
       type: "reduceDelay",
       unlockAt: startedAt + waitMinutes * MINUTE_MS,
       delayMinutes: delayMinutes
+    };
+  } else if (change.type === "disableHoverTarget") {
+    if (!config.requireHoverTarget) {
+      await browser.storage.local.set({ requireHoverTarget: false });
+      return { ok: true, applied: true, pending: null };
+    }
+
+    pending = {
+      ...pendingBase,
+      type: "disableHoverTarget",
+      unlockAt: startedAt + waitMinutes * MINUTE_MS
     };
   } else {
     return { ok: false, reason: "unknown-change", pending: null };
@@ -430,6 +467,8 @@ async function applyPendingConfigChange(pending) {
     if (delayMinutes < config.delayMinutes && config.delayMinutes <= pending.waitMinutes) {
       await browser.storage.local.set({ delayMinutes: delayMinutes });
     }
+  } else if (pending.type === "disableHoverTarget") {
+    await browser.storage.local.set({ requireHoverTarget: false });
   }
 
   await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
@@ -470,7 +509,8 @@ async function reconcileExpiredSessions() {
     await sendTabMessage(tabId, {
       type: "RESET_TIMER",
       remainingMs: nextSession.remainingMs,
-      active: await isTabActiveAndFocused(tabId)
+      active: await isTabActiveAndFocused(tabId),
+      requireHoverTarget: config.requireHoverTarget
     });
   }
 
@@ -616,7 +656,11 @@ async function handleContentReady(tabId, domain) {
   const active = await isTabActiveAndFocused(tabId);
 
   if (!config.enabled || !isDomainTracked(domain, config.sites)) {
-    return { type: "NO_OVERLAY", active: active };
+    return {
+      type: "NO_OVERLAY",
+      active: active,
+      requireHoverTarget: config.requireHoverTarget
+    };
   }
 
   let session = await getSession(tabId);
@@ -642,21 +686,33 @@ async function handleContentReady(tabId, domain) {
         type: "SHOW_OVERLAY",
         remainingMs: nextSession.remainingMs,
         resetAt: nextSession.expiresAt,
-        active: active
+        active: active,
+        requireHoverTarget: config.requireHoverTarget
       };
     }
 
     if (session.completed) {
-      return { type: "NO_OVERLAY", resetAt: resetAt, active: active };
+      return {
+        type: "NO_OVERLAY",
+        resetAt: resetAt,
+        active: active,
+        requireHoverTarget: config.requireHoverTarget
+      };
     }
     if (session.remainingMs <= 0) {
-      return { type: "NO_OVERLAY", resetAt: resetAt, active: active };
+      return {
+        type: "NO_OVERLAY",
+        resetAt: resetAt,
+        active: active,
+        requireHoverTarget: config.requireHoverTarget
+      };
     }
     return {
       type: "SHOW_OVERLAY",
       remainingMs: session.remainingMs,
       resetAt: resetAt,
-      active: active
+      active: active,
+      requireHoverTarget: config.requireHoverTarget
     };
   }
 
@@ -666,7 +722,8 @@ async function handleContentReady(tabId, domain) {
     type: "SHOW_OVERLAY",
     remainingMs: nextSession.remainingMs,
     resetAt: nextSession.expiresAt,
-    active: active
+    active: active,
+    requireHoverTarget: config.requireHoverTarget
   };
 }
 

@@ -8,7 +8,7 @@
 
   let config;
   try {
-    config = await browser.storage.local.get(["enabled", "sites"]);
+    config = await browser.storage.local.get(["enabled", "sites", "requireHoverTarget"]);
   } catch (e) {
     console.warn("[Airlock] Failed to read config:", e);
     return;
@@ -38,6 +38,11 @@
   // --- State ---
   let remainingMs = shouldShowOverlay ? response.remainingMs : 0;
   let backgroundActive = response ? response.active !== false : false;
+  let requireHoverTarget = shouldShowOverlay
+    ? response.requireHoverTarget === true
+    : config.requireHoverTarget === true;
+  let hoverTargetEngaged = false;
+  let hoverTargetPressed = false;
   let running = false;
   let lastTick = Date.now();
   let timerInterval = null;
@@ -49,6 +54,7 @@
   let pausedLabel = null;
   let continueBtn = null;
   let backdrop = null;
+  let hoverTarget = null;
 
   // --- Create Overlay ---
 
@@ -73,7 +79,7 @@
           left: 0;
           width: 100vw;
           height: 100vh;
-          background: rgba(10, 15, 30, 0.92);
+          background: rgba(10, 15, 30, 0.97);
           display: flex;
           align-items: center;
           justify-content: center;
@@ -94,10 +100,21 @@
         .breathing-circle {
           width: 120px;
           height: 120px;
+          position: relative;
           border-radius: 50%;
           background: radial-gradient(circle, rgba(91, 141, 239, 0.4), rgba(91, 141, 239, 0.1));
           border: 2px solid rgba(91, 141, 239, 0.3);
           animation: breathe 8s ease-in-out infinite;
+          transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+        }
+        .breathing-circle.hover-target-required {
+          cursor: pointer;
+          box-shadow: 0 0 0 8px rgba(255, 255, 255, 0.08);
+        }
+        .breathing-circle.hover-target-active {
+          background: radial-gradient(circle, rgba(91, 141, 239, 0.65), rgba(91, 141, 239, 0.22));
+          border-color: rgba(255, 255, 255, 0.72);
+          box-shadow: 0 0 0 10px rgba(91, 141, 239, 0.22);
         }
         @keyframes breathe {
           0%, 100% { transform: scale(1); opacity: 0.7; }
@@ -146,7 +163,7 @@
       </style>
       <div class="backdrop">
         <div class="card">
-          <div class="breathing-circle"></div>
+          <div class="breathing-circle" id="hover-target" title="Hover to run timer"></div>
           <div class="message">Take a moment...</div>
           <div class="timer" id="timer-display">0:00</div>
           <div class="paused-label" id="paused-label"></div>
@@ -162,8 +179,15 @@
     timerEl = shadowRoot.getElementById("timer-display");
     pausedLabel = shadowRoot.getElementById("paused-label");
     continueBtn = shadowRoot.getElementById("continue-btn");
+    hoverTarget = shadowRoot.getElementById("hover-target");
     continueBtn.addEventListener("click", () => dismissOverlay());
+    hoverTarget.addEventListener("pointerenter", () => refreshHoverTargetGate());
+    hoverTarget.addEventListener("pointerleave", () => refreshHoverTargetGate());
+    hoverTarget.addEventListener("pointerdown", () => setHoverTargetPressed(true));
+    hoverTarget.addEventListener("pointerup", () => setHoverTargetPressed(false));
+    hoverTarget.addEventListener("pointercancel", () => setHoverTargetPressed(false));
 
+    updateHoverTargetState();
     updateDisplay();
 
     // Trigger fade-in on next frame
@@ -190,11 +214,19 @@
       continueBtn.classList.add("visible");
     } else if (!running) {
       timerEl.classList.add("paused");
-      pausedLabel.textContent = "Paused";
+      pausedLabel.textContent = getPausedLabel();
     } else {
       timerEl.classList.remove("paused");
       pausedLabel.textContent = "";
     }
+  }
+
+  function getPausedLabel() {
+    if (requireHoverTarget && !isHoverTargetSatisfied() && backgroundActive && isPageActive()) {
+      return "Hover the circle";
+    }
+
+    return "Paused";
   }
 
   function dismissOverlay(options = {}) {
@@ -234,6 +266,7 @@
     pausedLabel = null;
     continueBtn = null;
     backdrop = null;
+    hoverTarget = null;
   }
 
   function showOverlay(nextRemainingMs, active = backgroundActive) {
@@ -264,8 +297,68 @@
     return document.visibilityState === "visible" && !document.hidden && document.hasFocus();
   }
 
+  function syncHoverTargetEngagement() {
+    if (!requireHoverTarget) {
+      hoverTargetEngaged = false;
+      hoverTargetPressed = false;
+      updateHoverTargetState();
+      return;
+    }
+
+    if (!hoverTarget || typeof hoverTarget.matches !== "function") return;
+
+    const nextEngaged = hoverTarget.matches(":hover") || hoverTargetPressed;
+    if (hoverTargetEngaged === nextEngaged) return;
+
+    hoverTargetEngaged = nextEngaged;
+    updateHoverTargetState();
+  }
+
+  function isHoverTargetSatisfied() {
+    syncHoverTargetEngagement();
+    return !requireHoverTarget || hoverTargetEngaged;
+  }
+
   function canRunTimer() {
-    return Boolean(overlay && remainingMs > 0 && backgroundActive && isPageActive());
+    return Boolean(
+      overlay &&
+      remainingMs > 0 &&
+      backgroundActive &&
+      isPageActive() &&
+      isHoverTargetSatisfied()
+    );
+  }
+
+  function updateHoverTargetState() {
+    if (!hoverTarget) return;
+
+    hoverTarget.classList.toggle("hover-target-required", requireHoverTarget);
+    hoverTarget.classList.toggle("hover-target-active", requireHoverTarget && hoverTargetEngaged);
+  }
+
+  function refreshHoverTargetGate() {
+    syncHoverTargetEngagement();
+    setRunning(canRunTimer(), { persistPaused: true });
+    updateDisplay();
+  }
+
+  function setHoverTargetPressed(nextPressed) {
+    hoverTargetPressed = requireHoverTarget && nextPressed === true;
+    refreshHoverTargetGate();
+  }
+
+  function setRequireHoverTarget(nextRequired) {
+    const normalized = nextRequired === true;
+    if (requireHoverTarget === normalized) return;
+
+    requireHoverTarget = normalized;
+    if (!requireHoverTarget) {
+      hoverTargetEngaged = false;
+      hoverTargetPressed = false;
+    }
+    updateHoverTargetState();
+    setRunning(canRunTimer(), { persistPaused: true });
+    updateDisplay();
   }
 
   function setRunning(nextRunning, options = {}) {
@@ -381,6 +474,7 @@
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
+      setHoverTargetPressed(false);
       pauseTimer();
     } else {
       resumeTimer();
@@ -400,6 +494,7 @@
     } else if (message.type === "ACTIVE_STATE") {
       setBackgroundActive(message.active);
     } else if (message.type === "RESET_TIMER") {
+      setRequireHoverTarget(message.requireHoverTarget);
       showOverlay(message.remainingMs, message.active);
     }
   });
@@ -419,6 +514,10 @@
       if (!stillTracked) {
         dismissOverlay({ notifyDone: false });
       }
+    }
+
+    if (areaName === "local" && changes.requireHoverTarget) {
+      setRequireHoverTarget(changes.requireHoverTarget.newValue);
     }
   });
 
