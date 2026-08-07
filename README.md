@@ -5,7 +5,7 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 ## How It Works
 
 1. You configure a list of websites, a wait duration in minutes, a reset window in hours, and optional hover-target enforcement via the popup
-2. When any tab navigates to a tracked site, a fullscreen overlay appears with a countdown timer and breathing animation
+2. When any tab navigates to a tracked site, a fullscreen overlay appears with a countdown timer and breathing focus target
 3. The timer **pauses** when you switch tabs, switch windows, or minimize the browser
 4. The timer **resumes** when you return to the tab, and optionally only while the pointer is on the overlay target
 5. When the countdown reaches zero, a "Continue" button appears to dismiss the overlay
@@ -40,9 +40,9 @@ For official Firefox uploads, package the authored source files directly instead
 
 ```sh
 mkdir -p store
-rm -f store/firefox-addon-1.0.4.zip
-zip -j store/firefox-addon-1.0.4.zip firefox/manifest.json
-zip -r store/firefox-addon-1.0.4.zip background content popup icons -x '*.DS_Store'
+rm -f store/firefox-addon-1.0.5.zip
+zip -j store/firefox-addon-1.0.5.zip firefox/manifest.json
+zip -r store/firefox-addon-1.0.5.zip background content popup icons -x '*.DS_Store'
 ```
 
 This keeps the submitted Firefox package free of generated extension files. The AMO generated-code question can be answered "No" when using this package.

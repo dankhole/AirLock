@@ -14,6 +14,8 @@ const pendingConfigTitle = document.getElementById("pending-config-title");
 const pendingConfigTimer = document.getElementById("pending-config-timer");
 const pendingConfigHoverTarget = document.getElementById("pending-config-hover-target");
 const pendingConfigCancel = document.getElementById("pending-config-cancel");
+const PENDING_CONFIG_TICK_MS = 250;
+const PENDING_CONFIG_SYNC_MS = 1000;
 
 let sites = [];
 let delayMinutes = 1;
@@ -22,7 +24,7 @@ let requireHoverTarget = false;
 let currentDomain = null;
 let pendingRemove = null;
 let pendingConfigChange = null;
-let pendingConfigInterval = null;
+let pendingConfigTimerTimeout = null;
 let pendingConfigTickAt = null;
 let pendingConfigHoverActive = false;
 let pendingConfigAdvanceInFlight = false;
@@ -265,9 +267,6 @@ pendingConfigCancel.addEventListener("click", () => {
 pendingConfigHoverTarget.addEventListener("pointerenter", (event) => {
   setPendingConfigHoverActive(event.pointerType !== "touch");
 });
-pendingConfigHoverTarget.addEventListener("pointermove", (event) => {
-  setPendingConfigHoverActive(event.pointerType !== "touch");
-});
 pendingConfigHoverTarget.addEventListener("pointerleave", () => setPendingConfigHoverActive(false));
 pendingConfigHoverTarget.addEventListener("pointerdown", (event) => {
   if (event.pointerType !== "mouse" && typeof pendingConfigHoverTarget.setPointerCapture === "function") {
@@ -382,10 +381,7 @@ function setControlsLocked(locked) {
 }
 
 function renderPendingConfigChange() {
-  if (pendingConfigInterval) {
-    clearInterval(pendingConfigInterval);
-    pendingConfigInterval = null;
-  }
+  clearPendingConfigTimerTimeout();
   pendingConfigTickAt = null;
   pendingConfigHoverActive = false;
   pendingConfigAdvanceInFlight = false;
@@ -407,7 +403,7 @@ function renderPendingConfigChange() {
   pendingConfigTickAt = Date.now();
   updatePendingConfigHoverTarget();
   updatePendingConfigTimer();
-  pendingConfigInterval = setInterval(updatePendingConfigTimer, 250);
+  schedulePendingConfigTimerTick();
 }
 
 function getPendingConfigTitle(pending) {
@@ -436,6 +432,7 @@ function updatePendingConfigTimer() {
   if (isPendingConfigHoverGated()) {
     if (pendingConfigHoverActive) {
       advancePendingConfigChangeCountdown(remainingMs);
+      schedulePendingConfigTimerTick();
     }
     return;
   }
@@ -445,7 +442,26 @@ function updatePendingConfigTimer() {
     refreshPendingConfigChange().finally(() => {
       pendingConfigRefreshInFlight = false;
     });
+  } else {
+    schedulePendingConfigTimerTick();
   }
+}
+
+function clearPendingConfigTimerTimeout() {
+  if (pendingConfigTimerTimeout) {
+    clearTimeout(pendingConfigTimerTimeout);
+    pendingConfigTimerTimeout = null;
+  }
+}
+
+function schedulePendingConfigTimerTick() {
+  if (pendingConfigTimerTimeout || !pendingConfigChange) return;
+  if (isPendingConfigHoverGated() && !pendingConfigHoverActive) return;
+
+  pendingConfigTimerTimeout = setTimeout(() => {
+    pendingConfigTimerTimeout = null;
+    updatePendingConfigTimer();
+  }, PENDING_CONFIG_TICK_MS);
 }
 
 function getPendingConfigRemainingMs() {
@@ -488,12 +504,14 @@ function setPendingConfigHoverActive(active) {
 
   if (!nextActive) {
     flushPendingConfigChange();
+    clearPendingConfigTimerTimeout();
   }
 
   pendingConfigHoverActive = nextActive;
   pendingConfigTickAt = Date.now();
   updatePendingConfigHoverTarget();
   updatePendingConfigTimer();
+  schedulePendingConfigTimerTick();
 }
 
 function advancePendingConfigChangeCountdown(remainingMs) {
@@ -501,7 +519,7 @@ function advancePendingConfigChangeCountdown(remainingMs) {
 
   const now = Date.now();
   const elapsedMs = Math.max(0, now - pendingConfigTickAt);
-  if (elapsedMs < 250 && remainingMs > 0) return;
+  if (elapsedMs < PENDING_CONFIG_SYNC_MS && remainingMs > 0) return;
 
   pendingConfigChange = {
     ...pendingConfigChange,
@@ -530,6 +548,7 @@ function advancePendingConfigChangeCountdown(remainingMs) {
     })
     .finally(() => {
       pendingConfigAdvanceInFlight = false;
+      schedulePendingConfigTimerTick();
     });
 }
 

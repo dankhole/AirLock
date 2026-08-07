@@ -1,8 +1,10 @@
 // Airlock - Content Script
-// Injects delay overlay with countdown timer and breathing animation.
+// Injects delay overlay with countdown timer and focus target.
 // Timer only ticks while tab is visible and window is focused.
 
 (async function () {
+  const TIMER_TICK_MS = 250;
+
   const hostname = window.location.hostname;
   if (!hostname) return;
 
@@ -46,7 +48,7 @@
   let hoverTargetPressed = false;
   let running = false;
   let lastTick = Date.now();
-  let timerInterval = null;
+  let timerTimeout = null;
   let activeStateInterval = null;
   let activeStateRefreshInFlight = false;
   let overlay = null;
@@ -100,6 +102,7 @@
           flex-direction: column;
           align-items: center;
           gap: 32px;
+          contain: layout style paint;
           user-select: none;
         }
         .hover-target {
@@ -110,34 +113,69 @@
           justify-content: center;
           position: relative;
           border-radius: 50%;
+          contain: layout style paint;
           touch-action: none;
+        }
+        .hover-target::before {
+          content: "";
+          position: absolute;
+          inset: 16px;
+          border: 2px solid rgba(255, 255, 255, 0.18);
+          border-radius: 50%;
+          opacity: 0;
+          pointer-events: none;
         }
         .hover-target.hover-target-required {
           cursor: pointer;
+        }
+        .hover-target.hover-target-required::before {
+          opacity: 1;
+        }
+        .hover-target.hover-target-active::before {
+          border-color: rgba(255, 255, 255, 0.72);
         }
         .breathing-circle {
           width: 120px;
           height: 120px;
           flex: 0 0 auto;
+          position: relative;
           pointer-events: none;
           border-radius: 50%;
-          background: radial-gradient(circle, rgba(91, 141, 239, 0.4), rgba(91, 141, 239, 0.1));
-          border: 2px solid rgba(91, 141, 239, 0.3);
-          animation: breathe 8s ease-in-out infinite;
-          transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+          background: rgba(91, 141, 239, 0.28);
+          border: 2px solid rgba(91, 141, 239, 0.36);
+        }
+        .breathing-circle::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          background: rgba(91, 141, 239, 0.24);
+          opacity: 0.38;
+          transform: scale(0.92) translateZ(0);
+          transform-origin: center;
+          animation: airlock-breathe 7s ease-in-out infinite;
           will-change: transform, opacity;
         }
-        .hover-target.hover-target-required .breathing-circle {
-          box-shadow: 0 0 0 8px rgba(255, 255, 255, 0.08);
-        }
         .hover-target.hover-target-active .breathing-circle {
-          background: radial-gradient(circle, rgba(91, 141, 239, 0.65), rgba(91, 141, 239, 0.22));
+          background: rgba(91, 141, 239, 0.46);
           border-color: rgba(255, 255, 255, 0.72);
-          box-shadow: 0 0 0 10px rgba(91, 141, 239, 0.22);
         }
-        @keyframes breathe {
-          0%, 100% { transform: scale(1); opacity: 0.7; }
-          50% { transform: scale(1.3); opacity: 1; }
+        @keyframes airlock-breathe {
+          0%, 100% {
+            opacity: 0.34;
+            transform: scale(0.92) translateZ(0);
+          }
+          50% {
+            opacity: 0.68;
+            transform: scale(1.28) translateZ(0);
+          }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .breathing-circle::after {
+            animation: none;
+            opacity: 0.45;
+            transform: scale(1) translateZ(0);
+          }
         }
         .message {
           font-size: 18px;
@@ -203,9 +241,6 @@
     hoverTarget = shadowRoot.getElementById("hover-target");
     continueBtn.addEventListener("click", () => dismissOverlay());
     hoverTarget.addEventListener("pointerenter", (event) => {
-      setHoverTargetPointerInside(event.pointerType !== "touch");
-    });
-    hoverTarget.addEventListener("pointermove", (event) => {
       setHoverTargetPointerInside(event.pointerType !== "touch");
     });
     hoverTarget.addEventListener("pointerleave", resetHoverTargetGate);
@@ -294,10 +329,7 @@
   function dismissOverlay(options = {}) {
     const notifyDone = options.notifyDone !== false;
 
-    if (timerInterval) {
-      clearInterval(timerInterval);
-      timerInterval = null;
-    }
+    clearTimerTimeout();
     stopActiveStatePolling();
     running = false;
 
@@ -336,10 +368,7 @@
   }
 
   function showOverlay(nextRemainingMs, active = backgroundActive) {
-    if (timerInterval) {
-      clearInterval(timerInterval);
-      timerInterval = null;
-    }
+    clearTimerTimeout();
 
     remainingMs = nextRemainingMs;
     backgroundActive = active !== false;
@@ -435,55 +464,74 @@
   }
 
   function setRunning(nextRunning, options = {}) {
-    if (running === nextRunning) return;
+    if (running === nextRunning) {
+      if (running) scheduleTimerTick();
+      return;
+    }
 
     running = nextRunning;
     lastTick = Date.now();
 
-    if (!running && options.persistPaused) {
-      persistState();
+    if (running) {
+      scheduleTimerTick();
+    } else {
+      clearTimerTimeout();
+      if (options.persistPaused) {
+        persistState();
+      }
     }
 
     updateDisplay();
   }
 
-  function startTimer() {
-    if (timerInterval) {
-      clearInterval(timerInterval);
+  function clearTimerTimeout() {
+    if (timerTimeout) {
+      clearTimeout(timerTimeout);
+      timerTimeout = null;
+    }
+  }
+
+  function scheduleTimerTick() {
+    if (timerTimeout || !running) return;
+
+    timerTimeout = setTimeout(runTimerTick, TIMER_TICK_MS);
+  }
+
+  function runTimerTick() {
+    timerTimeout = null;
+    const now = Date.now();
+
+    if (remainingMs <= 0) return;
+
+    if (!canRunTimer()) {
+      setRunning(false, { persistPaused: true });
+      lastTick = now;
+      return;
     }
 
-    lastTick = Date.now();
-    timerInterval = setInterval(() => {
-      const now = Date.now();
+    const elapsed = now - lastTick;
+    lastTick = now;
+    remainingMs = Math.max(0, remainingMs - elapsed);
 
-      if (remainingMs <= 0) return;
+    updateDisplay();
 
-      if (!canRunTimer()) {
-        setRunning(false, { persistPaused: true });
-        lastTick = now;
-        return;
-      }
-
-      if (!running) {
-        setRunning(true);
-        lastTick = now;
-        return;
-      }
-
-      const elapsed = now - lastTick;
-      lastTick = now;
-      remainingMs = Math.max(0, remainingMs - elapsed);
-
+    if (remainingMs <= 0) {
+      clearTimerTimeout();
+      stopActiveStatePolling();
+      running = false;
+      persistState();
       updateDisplay();
+      return;
+    }
 
-      if (remainingMs <= 0) {
-        clearInterval(timerInterval);
-        timerInterval = null;
-        stopActiveStatePolling();
-        running = false;
-        persistState();
-      }
-    }, 250);
+    scheduleTimerTick();
+  }
+
+  function startTimer() {
+    clearTimerTimeout();
+    lastTick = Date.now();
+    setRunning(canRunTimer());
+    updateDisplay();
   }
 
   function pauseTimer() {
