@@ -40,6 +40,31 @@
       </label>
     </section>
 
+    <section class="daily-lock-section" aria-labelledby="daily-lock-title">
+      <div class="daily-lock-header">
+        <div>
+          <h2 id="daily-lock-title">Daily lock</h2>
+          <p>Block tracked sites during this window</p>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="daily-lock-toggle" aria-label="Enable daily lock">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="daily-lock-times">
+        <label for="daily-lock-start">
+          <span>From</span>
+          <input type="time" id="daily-lock-start" value="22:00" required>
+        </label>
+        <span class="daily-lock-arrow" aria-hidden="true">&rarr;</span>
+        <label for="daily-lock-end">
+          <span>Until</span>
+          <input type="time" id="daily-lock-end" value="07:00" required>
+        </label>
+      </div>
+      <p id="daily-lock-status" class="daily-lock-status" aria-live="polite">Off</p>
+    </section>
+
     <section id="pending-config-section" class="pending-config-section" hidden>
       <div class="pending-config-copy">
         <span id="pending-config-title" class="pending-config-title">Updating settings</span>
@@ -68,6 +93,7 @@
       </form>
     </section>
   </div>
+  <script src="../shared/daily-lock.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

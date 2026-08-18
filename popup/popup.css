@@ -119,6 +119,86 @@ body {
   color: #888;
 }
 
+/* Daily Lock */
+.daily-lock-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  background: white;
+  border: 1px solid #e8eaf0;
+  border-radius: 8px;
+}
+
+.daily-lock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.daily-lock-header h2 {
+  color: #555;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.daily-lock-header p {
+  margin-top: 2px;
+  color: #999;
+  font-size: 11px;
+}
+
+.daily-lock-times {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: end;
+  gap: 8px;
+}
+
+.daily-lock-times label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #777;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.daily-lock-times input {
+  min-width: 0;
+  width: 100%;
+  padding: 6px 7px;
+  color: #333;
+  background: #fbfcff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.daily-lock-times input:focus {
+  border-color: #5b8def;
+}
+
+.daily-lock-arrow {
+  padding-bottom: 7px;
+  color: #aaa;
+  font-size: 14px;
+}
+
+.daily-lock-status {
+  min-height: 16px;
+  color: #888;
+  font-size: 12px;
+}
+
+.daily-lock-status.locked {
+  color: #c2410c;
+  font-weight: 600;
+}
+
 /* Pending Config Change */
 .pending-config-section {
   display: flex;

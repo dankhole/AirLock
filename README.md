@@ -1,10 +1,10 @@
 # Airlock
 
-A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional friction before accessing distracting websites. When you navigate to a tracked site, the page is covered with a calming countdown overlay. The timer only counts down while the tab is actively focused -- switching away pauses it.
+A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional friction before accessing distracting websites. When you navigate to a tracked site, the page is covered with a calming countdown overlay. The timer only counts down while the tab is actively focused -- switching away pauses it. An optional daily lock makes tracked sites completely unavailable during a recurring time window.
 
 ## How It Works
 
-1. You configure a list of websites, a wait duration in minutes, a reset window in hours, and optional hover-target enforcement via the popup
+1. You configure a list of websites, a wait duration in minutes, a reset window in hours, optional hover-target enforcement, and an optional daily lock window via the popup
 2. When any tab navigates to a tracked site, a fullscreen overlay appears with a countdown timer and breathing focus target
 3. The timer **pauses** when you switch tabs, switch windows, or minimize the browser
 4. The timer **resumes** when you return to the tab, and optionally only while the pointer is on the overlay target
@@ -15,6 +15,8 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 9. A tracked tab left open past the configured reset window requires a fresh wait
 10. Removing a tracked site or lowering the wait duration waits for the current wait duration before applying
 11. Guarded settings waits only count down while the settings popup is open and the settings hover target is active
+12. During the daily lock window, tracked sites show a non-dismissible lock overlay until the configured local end time
+13. Daily lock windows can run within one day or across midnight; open tabs update automatically at both boundaries
 
 Adding tracked sites and increasing the delay still apply immediately.
 Increasing time settings and turning on hover-target enforcement require confirmation. Turning off hover-target enforcement waits for the current wait duration before applying.
@@ -40,9 +42,9 @@ For official Firefox uploads, package the authored source files directly instead
 
 ```sh
 mkdir -p store
-rm -f store/firefox-addon-1.0.5.zip
-zip -j store/firefox-addon-1.0.5.zip firefox/manifest.json
-zip -r store/firefox-addon-1.0.5.zip background content popup icons -x '*.DS_Store'
+rm -f store/firefox-addon-1.0.6.zip
+zip -j store/firefox-addon-1.0.6.zip firefox/manifest.json
+zip -r store/firefox-addon-1.0.6.zip background content popup shared icons -x '*.DS_Store'
 ```
 
 This keeps the submitted Firefox package free of generated extension files. The AMO generated-code question can be answered "No" when using this package.
@@ -76,6 +78,13 @@ After making source changes, run `npm run build` and reload the extension.
 - Enable hover target -- timer only runs while hovering the circle
 - Start a guarded settings change -- countdown only runs while hovering the popup target
 
+### Daily lock
+- Enable **Daily lock** and choose different start and end times
+- Use a same-day window (for example, 9:00 AM–5:00 PM) or an overnight window (10:00 PM–7:00 AM)
+- During the window, verify that the overlay shows the local unlock time and has no Continue button
+- Leave a tracked tab open across either boundary and verify that it locks or unlocks automatically
+- After unlock, verify that an incomplete wait session resumes and a previously completed session remains complete
+
 ### Persistence
 - Refresh during countdown -- timer resumes, not reset
 - Open the same site in a new tab -- fresh timer
@@ -91,6 +100,8 @@ popup.js          <-- Config UI (toggle, delay, site list)
 background.js     <-- Session management, focus tracking, badge
     | messages
 content.js        <-- Overlay rendering, countdown timer, visibility detection
+    ^
+shared/daily-lock.js  <-- Daily schedule calculation shared with the popup
 ```
 
 - **popup.js** reads/writes config to `storage.local`
@@ -103,7 +114,7 @@ content.js        <-- Overlay rendering, countdown timer, visibility detection
 |---|---|
 | `storage` | Persist config and timer sessions locally |
 | `activeTab` | Read current tab URL for the "Track this site" button |
-| `alarms` | Apply delayed settings changes and configured tab resets |
+| `alarms` | Apply delayed settings changes, configured tab resets, and daily lock boundaries |
 
 ## Project Structure
 
@@ -115,6 +126,10 @@ background/
   background.js        Service worker: sessions, focus, badge, messages
 content/
   content.js           Overlay, countdown timer, visibility handling
+shared/
+  daily-lock.js        Daily lock validation and local-time boundary calculation
+tests/
+  *.test.js            Schedule and background integration tests
 popup/
   popup.html           Config UI structure
   popup.css            Popup styling

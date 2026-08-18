@@ -1,13 +1,14 @@
 {
   "name": "airlock",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
   "description": "Add intentional friction before accessing distracting websites.",
   "license": "GPL-3.0-only",
   "scripts": {
     "build": "node scripts/build.js",
     "build:chrome": "node scripts/build.js chrome",
-    "build:firefox": "node scripts/build.js firefox"
+    "build:firefox": "node scripts/build.js firefox",
+    "test": "node --test"
   },
   "devDependencies": {
     "webextension-polyfill": "^0.12.0"

@@ -1,6 +1,6 @@
 // Airlock - Content Script
-// Injects delay overlay with countdown timer and focus target.
-// Timer only ticks while tab is visible and window is focused.
+// Injects wait and daily-lock overlays for tracked sites.
+// Wait timers only tick while the tab is visible and window is focused.
 
 (async function () {
   const TIMER_TICK_MS = 250;
@@ -16,31 +16,36 @@
     return;
   }
 
-  if (config.enabled === false) return;
-
   const sites = config.sites || [];
-  const isTracked = sites.some(
+  const initiallyTracked = sites.some(
     (site) => hostname === site || hostname.endsWith("." + site)
   );
-  if (!isTracked) return;
+  let response = {
+    type: "NO_OVERLAY",
+    active: false,
+    requireHoverTarget: config.requireHoverTarget === true
+  };
 
-  let response;
-  try {
-    response = await browser.runtime.sendMessage({
-      type: "CONTENT_READY",
-      domain: hostname
-    });
-  } catch (e) {
-    console.warn("[Airlock] Failed to contact background:", e);
-    return;
+  if (config.enabled !== false && initiallyTracked) {
+    try {
+      response = await browser.runtime.sendMessage({
+        type: "CONTENT_READY",
+        domain: hostname
+      });
+    } catch (e) {
+      console.warn("[Airlock] Failed to contact background:", e);
+    }
   }
 
-  const shouldShowOverlay = response && response.type === "SHOW_OVERLAY";
+  const shouldShowTimer = response && response.type === "SHOW_OVERLAY";
+  const shouldShowDailyLock = response && response.type === "SHOW_DAILY_LOCK";
 
   // --- State ---
-  let remainingMs = shouldShowOverlay ? response.remainingMs : 0;
+  let overlayMode = shouldShowDailyLock ? "dailyLock" : shouldShowTimer ? "timer" : null;
+  let remainingMs = shouldShowTimer ? response.remainingMs : 0;
+  let dailyLockUntil = shouldShowDailyLock ? response.unlockAt : null;
   let backgroundActive = response ? response.active !== false : false;
-  let requireHoverTarget = shouldShowOverlay
+  let requireHoverTarget = shouldShowTimer
     ? response.requireHoverTarget === true
     : config.requireHoverTarget === true;
   let hoverTargetEngaged = false;
@@ -49,16 +54,21 @@
   let running = false;
   let lastTick = Date.now();
   let timerTimeout = null;
+  let dailyLockTimeout = null;
   let activeStateInterval = null;
   let activeStateRefreshInFlight = false;
+  let configRecheckInFlight = false;
+  let configRecheckPending = false;
   let overlay = null;
   let shadowRoot = null;
+  let messageEl = null;
   let timerEl = null;
   let pausedLabel = null;
   let continueBtn = null;
   let backdrop = null;
   let hoverTarget = null;
   let lastTimerText = null;
+  let lastMessageText = null;
   let lastPausedLabelText = null;
   let lastTimerPaused = null;
   let lastContinueVisible = null;
@@ -96,6 +106,9 @@
         }
         .backdrop.visible {
           opacity: 1;
+        }
+        .backdrop.daily-lock {
+          background: rgba(24, 14, 10, 0.98);
         }
         .card {
           display: flex;
@@ -160,6 +173,13 @@
           background: rgba(91, 141, 239, 0.46);
           border-color: rgba(255, 255, 255, 0.72);
         }
+        .backdrop.daily-lock .breathing-circle {
+          background: rgba(249, 115, 22, 0.26);
+          border-color: rgba(251, 146, 60, 0.5);
+        }
+        .backdrop.daily-lock .breathing-circle::after {
+          background: rgba(249, 115, 22, 0.28);
+        }
         @keyframes airlock-breathe {
           0%, 100% {
             opacity: 0.34;
@@ -223,7 +243,7 @@
           <div class="hover-target" id="hover-target" title="Hover to run timer">
             <div class="breathing-circle"></div>
           </div>
-          <div class="message">Take a moment...</div>
+          <div class="message" id="overlay-message">Take a moment...</div>
           <div class="timer" id="timer-display">0:00</div>
           <div class="paused-label" id="paused-label"></div>
           <button class="continue-btn" id="continue-btn">Continue</button>
@@ -235,6 +255,7 @@
     overlay = host;
 
     backdrop = shadowRoot.querySelector(".backdrop");
+    messageEl = shadowRoot.getElementById("overlay-message");
     timerEl = shadowRoot.getElementById("timer-display");
     pausedLabel = shadowRoot.getElementById("paused-label");
     continueBtn = shadowRoot.getElementById("continue-btn");
@@ -266,7 +287,9 @@
 
     // Trigger fade-in on next frame
     requestAnimationFrame(() => {
-      backdrop.classList.add("visible");
+      if (backdrop && overlayMode !== null) {
+        backdrop.classList.add("visible");
+      }
     });
   }
 
@@ -277,20 +300,31 @@
     return minutes + ":" + String(seconds).padStart(2, "0");
   }
 
+  function formatClockTime(timestamp) {
+    if (typeof timestamp !== "number") return "the scheduled time";
+    return new Date(timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+
   function updateDisplay() {
     if (!timerEl) return;
 
-    const timerText = formatTime(remainingMs);
-    if (lastTimerText !== timerText) {
-      lastTimerText = timerText;
-      timerEl.textContent = timerText;
+    const isDailyLock = overlayMode === "dailyLock";
+    backdrop.classList.toggle("daily-lock", isDailyLock);
+
+    if (isDailyLock) {
+      setMessageText("Locked until");
+      setTimerText(formatClockTime(dailyLockUntil));
+      setTimerPaused(false);
+      setPausedLabelText("Daily lock · access resumes automatically");
+      setContinueVisible(false);
+      return;
     }
 
+    setMessageText("Take a moment...");
+    setTimerText(formatTime(remainingMs));
+
     const paused = remainingMs > 0 && !running;
-    if (lastTimerPaused !== paused) {
-      lastTimerPaused = paused;
-      timerEl.classList.toggle("paused", paused);
-    }
+    setTimerPaused(paused);
 
     if (remainingMs <= 0) {
       setPausedLabelText("");
@@ -302,6 +336,27 @@
       setPausedLabelText("");
       setContinueVisible(false);
     }
+  }
+
+  function setMessageText(text) {
+    if (lastMessageText === text) return;
+
+    lastMessageText = text;
+    messageEl.textContent = text;
+  }
+
+  function setTimerText(text) {
+    if (lastTimerText === text) return;
+
+    lastTimerText = text;
+    timerEl.textContent = text;
+  }
+
+  function setTimerPaused(paused) {
+    if (lastTimerPaused === paused) return;
+
+    lastTimerPaused = paused;
+    timerEl.classList.toggle("paused", paused);
   }
 
   function setPausedLabelText(text) {
@@ -328,22 +383,33 @@
 
   function dismissOverlay(options = {}) {
     const notifyDone = options.notifyDone !== false;
+    const dismissedMode = overlayMode;
+    const dismissedOverlay = overlay;
 
     clearTimerTimeout();
+    clearDailyLockTimeout();
     stopActiveStatePolling();
     running = false;
+    overlayMode = null;
+    dailyLockUntil = null;
+
+    const removeDismissedOverlay = () => {
+      if (overlay === dismissedOverlay && overlayMode === null) {
+        removeOverlayElement();
+      }
+    };
 
     if (backdrop) {
       backdrop.classList.remove("visible");
       // Wait for fade-out transition then remove
-      backdrop.addEventListener("transitionend", removeOverlayElement, { once: true });
+      backdrop.addEventListener("transitionend", removeDismissedOverlay, { once: true });
       // Fallback if transitionend doesn't fire
-      setTimeout(removeOverlayElement, 300);
+      setTimeout(removeDismissedOverlay, 300);
     } else {
-      removeOverlayElement();
+      removeDismissedOverlay();
     }
 
-    if (notifyDone) {
+    if (notifyDone && dismissedMode === "timer") {
       try {
         browser.runtime.sendMessage({ type: "TIMER_DONE" });
       } catch {
@@ -356,12 +422,14 @@
     if (overlay) overlay.remove();
     overlay = null;
     shadowRoot = null;
+    messageEl = null;
     timerEl = null;
     pausedLabel = null;
     continueBtn = null;
     backdrop = null;
     hoverTarget = null;
     lastTimerText = null;
+    lastMessageText = null;
     lastPausedLabelText = null;
     lastTimerPaused = null;
     lastContinueVisible = null;
@@ -369,7 +437,10 @@
 
   function showOverlay(nextRemainingMs, active = backgroundActive) {
     clearTimerTimeout();
+    clearDailyLockTimeout();
 
+    overlayMode = "timer";
+    dailyLockUntil = null;
     remainingMs = nextRemainingMs;
     backgroundActive = active !== false;
     running = false;
@@ -377,13 +448,62 @@
     if (!overlay) {
       createOverlay();
     } else {
+      backdrop.classList.add("visible");
+      updateHoverTargetState();
       updateDisplay();
     }
 
     if (remainingMs > 0) {
       startTimer();
       startActiveStatePolling();
+    } else {
+      stopActiveStatePolling();
     }
+  }
+
+  function showDailyLock(unlockAt) {
+    if (overlayMode === "timer") {
+      setRunning(false, { persistPaused: true });
+    } else {
+      clearTimerTimeout();
+    }
+
+    clearDailyLockTimeout();
+    stopActiveStatePolling();
+    overlayMode = "dailyLock";
+    dailyLockUntil = unlockAt;
+    running = false;
+    hoverTargetEngaged = false;
+    hoverTargetPointerInside = false;
+    hoverTargetPressed = false;
+
+    if (!overlay) {
+      createOverlay();
+    } else {
+      backdrop.classList.add("visible");
+      updateHoverTargetState();
+      updateDisplay();
+    }
+
+    scheduleDailyLockRelease();
+  }
+
+  function clearDailyLockTimeout() {
+    if (dailyLockTimeout) {
+      clearTimeout(dailyLockTimeout);
+      dailyLockTimeout = null;
+    }
+  }
+
+  function scheduleDailyLockRelease() {
+    clearDailyLockTimeout();
+    if (overlayMode !== "dailyLock" || typeof dailyLockUntil !== "number") return;
+
+    const delay = Math.max(0, dailyLockUntil - Date.now()) + 50;
+    dailyLockTimeout = setTimeout(() => {
+      dailyLockTimeout = null;
+      recheckConfig();
+    }, delay);
   }
 
   // --- Timer Logic ---
@@ -399,6 +519,7 @@
   function canRunTimer() {
     return Boolean(
       overlay &&
+      overlayMode === "timer" &&
       remainingMs > 0 &&
       backgroundActive &&
       isPageActive() &&
@@ -409,12 +530,21 @@
   function updateHoverTargetState() {
     if (!hoverTarget) return;
 
-    hoverTarget.classList.toggle("hover-target-required", requireHoverTarget);
-    hoverTarget.classList.toggle("hover-target-active", requireHoverTarget && hoverTargetEngaged);
+    const hoverRequired = overlayMode === "timer" && requireHoverTarget;
+    hoverTarget.classList.toggle("hover-target-required", hoverRequired);
+    hoverTarget.classList.toggle("hover-target-active", hoverRequired && hoverTargetEngaged);
+    hoverTarget.title = overlayMode === "dailyLock"
+      ? "Daily lock active"
+      : hoverRequired
+        ? "Hover to run timer"
+        : "";
   }
 
   function updateHoverTargetGate() {
-    const nextEngaged = requireHoverTarget && (hoverTargetPointerInside || hoverTargetPressed);
+    const nextEngaged =
+      overlayMode === "timer" &&
+      requireHoverTarget &&
+      (hoverTargetPointerInside || hoverTargetPressed);
     if (hoverTargetEngaged !== nextEngaged) {
       hoverTargetEngaged = nextEngaged;
       updateHoverTargetState();
@@ -425,7 +555,7 @@
   }
 
   function setHoverTargetPointerInside(nextInside) {
-    const normalized = requireHoverTarget && nextInside === true;
+    const normalized = overlayMode === "timer" && requireHoverTarget && nextInside === true;
     if (hoverTargetPointerInside === normalized) return;
 
     hoverTargetPointerInside = normalized;
@@ -433,7 +563,7 @@
   }
 
   function setHoverTargetPressed(nextPressed) {
-    const normalized = requireHoverTarget && nextPressed === true;
+    const normalized = overlayMode === "timer" && requireHoverTarget && nextPressed === true;
     if (hoverTargetPressed === normalized) return;
 
     hoverTargetPressed = normalized;
@@ -476,7 +606,7 @@
       scheduleTimerTick();
     } else {
       clearTimerTimeout();
-      if (options.persistPaused) {
+      if (options.persistPaused && overlayMode === "timer") {
         persistState();
       }
     }
@@ -556,6 +686,7 @@
 
   function startActiveStatePolling() {
     stopActiveStatePolling();
+    if (overlayMode !== "timer") return;
     refreshBackgroundActiveState();
     activeStateInterval = setInterval(refreshBackgroundActiveState, 1000);
   }
@@ -568,7 +699,12 @@
   }
 
   function refreshBackgroundActiveState() {
-    if (activeStateRefreshInFlight || !overlay || remainingMs <= 0) return;
+    if (
+      activeStateRefreshInFlight ||
+      !overlay ||
+      overlayMode !== "timer" ||
+      remainingMs <= 0
+    ) return;
 
     activeStateRefreshInFlight = true;
     browser.runtime
@@ -587,6 +723,8 @@
   }
 
   function persistState() {
+    if (overlayMode !== "timer") return;
+
     try {
       browser.runtime.sendMessage({
         type: "TIMER_UPDATE",
@@ -595,6 +733,53 @@
     } catch {
       // Extension context may be invalidated
     }
+  }
+
+  function applyConfigResponse(nextResponse) {
+    if (nextResponse && nextResponse.type === "SHOW_DAILY_LOCK") {
+      showDailyLock(nextResponse.unlockAt);
+      return;
+    }
+
+    if (nextResponse && nextResponse.type === "SHOW_OVERLAY") {
+      setRequireHoverTarget(nextResponse.requireHoverTarget);
+      showOverlay(nextResponse.remainingMs, nextResponse.active);
+      return;
+    }
+
+    dismissOverlay({ notifyDone: false });
+  }
+
+  function recheckConfig() {
+    if (configRecheckInFlight) {
+      configRecheckPending = true;
+      return;
+    }
+
+    configRecheckInFlight = true;
+    if (overlayMode === "timer") {
+      pauseTimer();
+    }
+
+    browser.runtime
+      .sendMessage({
+        type: "CONTENT_READY",
+        domain: hostname
+      })
+      .then(applyConfigResponse)
+      .catch(() => {
+        if (overlayMode === "dailyLock") {
+          clearDailyLockTimeout();
+          dailyLockTimeout = setTimeout(recheckConfig, 5000);
+        }
+      })
+      .finally(() => {
+        configRecheckInFlight = false;
+        if (configRecheckPending) {
+          configRecheckPending = false;
+          recheckConfig();
+        }
+      });
   }
 
   // --- Visibility / Focus Handling ---
@@ -626,6 +811,10 @@
     } else if (message.type === "RESET_TIMER") {
       setRequireHoverTarget(message.requireHoverTarget);
       showOverlay(message.remainingMs, message.active);
+    } else if (message.type === "SHOW_DAILY_LOCK") {
+      showDailyLock(message.unlockAt);
+    } else if (message.type === "RECHECK_CONFIG") {
+      recheckConfig();
     }
   });
 
@@ -653,7 +842,9 @@
 
   // --- Start ---
 
-  if (shouldShowOverlay) {
+  if (shouldShowTimer) {
     showOverlay(response.remainingMs, response.active);
+  } else if (shouldShowDailyLock) {
+    showDailyLock(response.unlockAt);
   }
 })();

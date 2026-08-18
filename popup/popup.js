@@ -1,9 +1,14 @@
 // Airlock - Popup Configuration UI
 
+const dailyLockApi = globalThis.AirlockDailyLock;
 const enabledToggle = document.getElementById("enabled-toggle");
 const delayInput = document.getElementById("delay-input");
 const resetInput = document.getElementById("reset-input");
 const hoverTargetToggle = document.getElementById("hover-target-toggle");
+const dailyLockToggle = document.getElementById("daily-lock-toggle");
+const dailyLockStartInput = document.getElementById("daily-lock-start");
+const dailyLockEndInput = document.getElementById("daily-lock-end");
+const dailyLockStatus = document.getElementById("daily-lock-status");
 const siteList = document.getElementById("site-list");
 const addSiteForm = document.getElementById("add-site-form");
 const siteInput = document.getElementById("site-input");
@@ -21,6 +26,9 @@ let sites = [];
 let delayMinutes = 1;
 let resetHours = 24;
 let requireHoverTarget = false;
+let dailyLockEnabled = false;
+let dailyLockStart = dailyLockApi.DEFAULT_START;
+let dailyLockEnd = dailyLockApi.DEFAULT_END;
 let currentDomain = null;
 let pendingRemove = null;
 let pendingConfigChange = null;
@@ -38,16 +46,32 @@ browser.storage.local.get([
   "sites",
   "delayMinutes",
   "resetHours",
-  "requireHoverTarget"
+  "requireHoverTarget",
+  "dailyLockEnabled",
+  "dailyLockStart",
+  "dailyLockEnd"
 ]).then((result) => {
   enabledToggle.checked = result.enabled !== false;
 
   delayMinutes = normalizeDelayMinutes(result.delayMinutes || 1);
   resetHours = normalizeResetHours(result.resetHours || 24);
   requireHoverTarget = result.requireHoverTarget === true;
+  dailyLockStart = dailyLockApi.normalizeTimeOfDay(
+    result.dailyLockStart,
+    dailyLockApi.DEFAULT_START
+  );
+  dailyLockEnd = dailyLockApi.normalizeTimeOfDay(
+    result.dailyLockEnd,
+    dailyLockApi.DEFAULT_END
+  );
+  dailyLockEnabled = result.dailyLockEnabled === true && dailyLockStart !== dailyLockEnd;
   delayInput.value = delayMinutes;
   resetInput.value = resetHours;
   hoverTargetToggle.checked = requireHoverTarget;
+  dailyLockToggle.checked = dailyLockEnabled;
+  dailyLockStartInput.value = dailyLockStart;
+  dailyLockEndInput.value = dailyLockEnd;
+  renderDailyLockStatus();
 
   sites = result.sites || [];
   renderSites();
@@ -158,6 +182,147 @@ hoverTargetToggle.addEventListener("change", () => {
     type: "disableHoverTarget"
   });
 });
+
+// --- Daily Lock ---
+
+dailyLockToggle.addEventListener("change", () => {
+  if (pendingConfigChange) {
+    dailyLockToggle.checked = dailyLockEnabled;
+    return;
+  }
+
+  const schedule = validateDailyLockInputs();
+  if (!schedule) {
+    dailyLockToggle.checked = dailyLockEnabled;
+    return;
+  }
+
+  const nextEnabled = dailyLockToggle.checked === true;
+  if (
+    nextEnabled &&
+    !window.confirm(
+      "Turn on the daily lock from " +
+        formatTimeOfDayLabel(schedule.start) +
+        " to " +
+        formatTimeOfDayLabel(schedule.end) +
+        "? Tracked sites cannot be opened during this window."
+    )
+  ) {
+    dailyLockToggle.checked = dailyLockEnabled;
+    return;
+  }
+
+  dailyLockEnabled = nextEnabled;
+  dailyLockStart = schedule.start;
+  dailyLockEnd = schedule.end;
+  browser.storage.local.set({
+    dailyLockEnabled: dailyLockEnabled,
+    dailyLockStart: dailyLockStart,
+    dailyLockEnd: dailyLockEnd
+  });
+  renderDailyLockStatus();
+});
+
+dailyLockStartInput.addEventListener("change", saveDailyLockTimes);
+dailyLockEndInput.addEventListener("change", saveDailyLockTimes);
+
+function saveDailyLockTimes() {
+  if (pendingConfigChange) {
+    dailyLockStartInput.value = dailyLockStart;
+    dailyLockEndInput.value = dailyLockEnd;
+    return;
+  }
+
+  const schedule = validateDailyLockInputs();
+  if (!schedule) return;
+
+  dailyLockStart = schedule.start;
+  dailyLockEnd = schedule.end;
+  browser.storage.local.set({
+    dailyLockStart: dailyLockStart,
+    dailyLockEnd: dailyLockEnd
+  });
+  renderDailyLockStatus();
+}
+
+function validateDailyLockInputs() {
+  const start = dailyLockApi.normalizeTimeOfDay(dailyLockStartInput.value, null);
+  const end = dailyLockApi.normalizeTimeOfDay(dailyLockEndInput.value, null);
+  let error = "";
+
+  if (!start || !end) {
+    error = "Choose both a start and end time.";
+  } else if (start === end) {
+    error = "Start and end times must be different.";
+  }
+
+  dailyLockStartInput.setCustomValidity(error);
+  dailyLockEndInput.setCustomValidity(error);
+
+  if (error) {
+    dailyLockStatus.textContent = error;
+    dailyLockStatus.classList.remove("locked");
+    const invalidInput = !start ? dailyLockStartInput : dailyLockEndInput;
+    invalidInput.reportValidity();
+    return null;
+  }
+
+  return { start: start, end: end };
+}
+
+function renderDailyLockStatus() {
+  dailyLockToggle.checked = dailyLockEnabled;
+
+  const validationMessage =
+    dailyLockStartInput.validationMessage || dailyLockEndInput.validationMessage;
+  if (validationMessage) {
+    dailyLockStatus.textContent = validationMessage;
+    dailyLockStatus.classList.remove("locked");
+    return;
+  }
+
+  if (!dailyLockEnabled) {
+    dailyLockStatus.textContent =
+      "Off · " + formatTimeOfDayLabel(dailyLockStart) + "–" + formatTimeOfDayLabel(dailyLockEnd);
+    dailyLockStatus.classList.remove("locked");
+    return;
+  }
+
+  if (!enabledToggle.checked) {
+    dailyLockStatus.textContent = "Scheduled · Airlock is off";
+    dailyLockStatus.classList.remove("locked");
+    return;
+  }
+
+  const state = dailyLockApi.getState({
+    enabled: true,
+    start: dailyLockStart,
+    end: dailyLockEnd
+  });
+
+  if (!state.valid) {
+    dailyLockStatus.textContent = "Choose different start and end times.";
+    dailyLockStatus.classList.remove("locked");
+  } else if (state.locked) {
+    dailyLockStatus.textContent = "Locked now · opens at " + formatClockTime(state.unlockAt);
+    dailyLockStatus.classList.add("locked");
+  } else {
+    dailyLockStatus.textContent = "Next lock at " + formatClockTime(state.nextBoundaryAt);
+    dailyLockStatus.classList.remove("locked");
+  }
+}
+
+function formatTimeOfDayLabel(value) {
+  const parsed = dailyLockApi.parseTimeOfDay(value);
+  if (!parsed) return value;
+
+  const date = new Date(2000, 0, 1, parsed.hours, parsed.minutes);
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function formatClockTime(timestamp) {
+  return new Date(timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
 
 // --- Site List ---
 
@@ -287,6 +452,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
 
   if (changes.enabled) {
     enabledToggle.checked = changes.enabled.newValue !== false;
+    renderDailyLockStatus();
   }
 
   if (changes.delayMinutes) {
@@ -302,6 +468,33 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   if (changes.requireHoverTarget) {
     requireHoverTarget = changes.requireHoverTarget.newValue === true;
     hoverTargetToggle.checked = requireHoverTarget;
+  }
+
+  if (changes.dailyLockEnabled) {
+    dailyLockEnabled = changes.dailyLockEnabled.newValue === true;
+  }
+
+  if (changes.dailyLockStart) {
+    dailyLockStart = dailyLockApi.normalizeTimeOfDay(
+      changes.dailyLockStart.newValue,
+      dailyLockApi.DEFAULT_START
+    );
+    dailyLockStartInput.value = dailyLockStart;
+  }
+
+  if (changes.dailyLockEnd) {
+    dailyLockEnd = dailyLockApi.normalizeTimeOfDay(
+      changes.dailyLockEnd.newValue,
+      dailyLockApi.DEFAULT_END
+    );
+    dailyLockEndInput.value = dailyLockEnd;
+  }
+
+  if (changes.dailyLockEnabled || changes.dailyLockStart || changes.dailyLockEnd) {
+    dailyLockEnabled = dailyLockEnabled && dailyLockStart !== dailyLockEnd;
+    dailyLockStartInput.setCustomValidity("");
+    dailyLockEndInput.setCustomValidity("");
+    renderDailyLockStatus();
   }
 
   if (changes.sites) {
@@ -371,6 +564,9 @@ function setControlsLocked(locked) {
   delayInput.disabled = locked;
   resetInput.disabled = locked;
   hoverTargetToggle.disabled = locked;
+  dailyLockToggle.disabled = locked;
+  dailyLockStartInput.disabled = locked;
+  dailyLockEndInput.disabled = locked;
   siteInput.disabled = locked;
   addSiteBtn.disabled = locked;
   addCurrentBtn.disabled = locked;
@@ -611,3 +807,5 @@ document.addEventListener("visibilitychange", () => {
 });
 
 window.addEventListener("pagehide", flushPendingConfigChange);
+
+setInterval(renderDailyLockStatus, 15000);

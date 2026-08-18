@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Airlock",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Add intentional friction before accessing distracting websites.",
   "permissions": ["storage", "activeTab", "alarms"],
   "action": {
@@ -18,7 +18,7 @@
     "128": "icons/icon-128.png"
   },
   "background": {
-    "scripts": ["background/background.js"]
+    "scripts": ["shared/daily-lock.js", "background/background.js"]
   },
   "content_scripts": [
     {

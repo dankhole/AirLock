@@ -6,6 +6,7 @@ const rootDir = path.resolve(__dirname, "..");
 const distDir = path.join(rootDir, "dist");
 
 const filesToCopy = [
+  "shared/daily-lock.js",
   "popup/popup.html",
   "popup/popup.css",
   "popup/popup.js",
@@ -71,7 +72,10 @@ function buildForBrowser(browser) {
     const bgContent = fs.readFileSync(bgSrc, "utf-8");
     const bgOut = path.join(outDir, "background", "background.js");
     fs.mkdirSync(path.dirname(bgOut), { recursive: true });
-    fs.writeFileSync(bgOut, 'importScripts("../lib/browser-polyfill.min.js");\n\n' + bgContent);
+    fs.writeFileSync(
+      bgOut,
+      'importScripts("../lib/browser-polyfill.min.js", "../shared/daily-lock.js");\n\n' + bgContent
+    );
   }
 
   // Write manifest

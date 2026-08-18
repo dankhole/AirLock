@@ -1,17 +1,22 @@
 // Airlock - Background Service Worker
 // Manages timer sessions, focus tracking, badge, and message coordination.
 
+const dailyLockApi = globalThis.AirlockDailyLock;
 const DEFAULT_CONFIG = {
   enabled: true,
   sites: [],
   delayMinutes: 1,
   resetHours: 24,
-  requireHoverTarget: false
+  requireHoverTarget: false,
+  dailyLockEnabled: false,
+  dailyLockStart: dailyLockApi.DEFAULT_START,
+  dailyLockEnd: dailyLockApi.DEFAULT_END
 };
 
 const PENDING_CONFIG_CHANGE_KEY = "pendingConfigChange";
 const PENDING_CONFIG_CHANGE_ALARM = "airlock.pendingConfigChange";
 const SESSION_RESET_ALARM = "airlock.sessionReset";
+const DAILY_LOCK_BOUNDARY_ALARM = "airlock.dailyLockBoundary";
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 
@@ -21,6 +26,7 @@ browser.runtime.onInstalled.addListener(async () => {
   await migrateStoredConfig();
   await reconcilePendingConfigChange();
   await reconcileExpiredSessions();
+  await scheduleDailyLockBoundaryAlarm();
 });
 
 browser.runtime.onStartup.addListener(() => {
@@ -40,6 +46,8 @@ async function reconcileStartupState() {
     await migrateStoredConfig();
     await reconcilePendingConfigChange();
     await reconcileExpiredSessions();
+    await scheduleDailyLockBoundaryAlarm();
+    await broadcastConfigRecheck();
   } catch (error) {
     console.warn("[Airlock] Failed to reconcile startup state:", error);
   }
@@ -52,7 +60,10 @@ async function migrateStoredConfig() {
     "delayMinutes",
     "delaySeconds",
     "resetHours",
-    "requireHoverTarget"
+    "requireHoverTarget",
+    "dailyLockEnabled",
+    "dailyLockStart",
+    "dailyLockEnd"
   ]);
   const updates = {};
 
@@ -82,6 +93,27 @@ async function migrateStoredConfig() {
     }
   }
 
+  const dailyLockStart = dailyLockApi.normalizeTimeOfDay(
+    existing.dailyLockStart,
+    DEFAULT_CONFIG.dailyLockStart
+  );
+  const dailyLockEnd = dailyLockApi.normalizeTimeOfDay(
+    existing.dailyLockEnd,
+    DEFAULT_CONFIG.dailyLockEnd
+  );
+
+  if (existing.dailyLockStart !== dailyLockStart) {
+    updates.dailyLockStart = dailyLockStart;
+  }
+  if (existing.dailyLockEnd !== dailyLockEnd) {
+    updates.dailyLockEnd = dailyLockEnd;
+  }
+
+  const dailyLockEnabled = existing.dailyLockEnabled === true && dailyLockStart !== dailyLockEnd;
+  if (existing.dailyLockEnabled !== dailyLockEnabled) {
+    updates.dailyLockEnabled = dailyLockEnabled;
+  }
+
   if (Object.keys(updates).length > 0) {
     await browser.storage.local.set(updates);
   }
@@ -97,14 +129,26 @@ async function readConfig() {
     "sites",
     "delayMinutes",
     "resetHours",
-    "requireHoverTarget"
+    "requireHoverTarget",
+    "dailyLockEnabled",
+    "dailyLockStart",
+    "dailyLockEnd"
   ]);
   return {
     enabled: result.enabled !== false,
     sites: result.sites || [],
     delayMinutes: clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes),
     resetHours: clampResetHours(result.resetHours || DEFAULT_CONFIG.resetHours),
-    requireHoverTarget: normalizeRequireHoverTarget(result.requireHoverTarget)
+    requireHoverTarget: normalizeRequireHoverTarget(result.requireHoverTarget),
+    dailyLockEnabled: result.dailyLockEnabled === true,
+    dailyLockStart: dailyLockApi.normalizeTimeOfDay(
+      result.dailyLockStart,
+      DEFAULT_CONFIG.dailyLockStart
+    ),
+    dailyLockEnd: dailyLockApi.normalizeTimeOfDay(
+      result.dailyLockEnd,
+      DEFAULT_CONFIG.dailyLockEnd
+    )
   };
 }
 
@@ -133,6 +177,17 @@ function clampResetHours(value) {
 
 function normalizeRequireHoverTarget(value) {
   return value === true;
+}
+
+function getDailyLockState(config, now = Date.now()) {
+  return dailyLockApi.getState(
+    {
+      enabled: config.enabled && config.dailyLockEnabled,
+      start: config.dailyLockStart,
+      end: config.dailyLockEnd
+    },
+    now
+  );
 }
 
 async function getSession(tabId) {
@@ -233,6 +288,44 @@ async function scheduleSessionResetAlarm() {
   await browser.alarms.create(SESSION_RESET_ALARM, {
     when: nextExpiresAt
   });
+}
+
+async function scheduleDailyLockBoundaryAlarm() {
+  if (!browser.alarms) return;
+
+  const config = await readConfig();
+  const state = getDailyLockState(config);
+
+  if (!state.nextBoundaryAt) {
+    await browser.alarms.clear(DAILY_LOCK_BOUNDARY_ALARM);
+    return;
+  }
+
+  await browser.alarms.create(DAILY_LOCK_BOUNDARY_ALARM, {
+    when: state.nextBoundaryAt
+  });
+}
+
+async function broadcastConfigRecheck() {
+  let tabs = [];
+
+  try {
+    tabs = await browser.tabs.query({});
+  } catch {
+    return;
+  }
+
+  await Promise.all(
+    tabs
+      .filter((tab) => typeof tab.id === "number")
+      .map((tab) => sendTabMessage(tab.id, { type: "RECHECK_CONFIG" }))
+  );
+}
+
+async function reconcileDailyLockBoundary() {
+  await scheduleDailyLockBoundaryAlarm();
+  await broadcastConfigRecheck();
+  await updateBadge();
 }
 
 // --- Badge ---
@@ -476,6 +569,7 @@ async function applyPendingConfigChange(pending) {
 
 async function reconcileExpiredSessions() {
   const config = await readConfig();
+  const dailyLockState = getDailyLockState(config);
   const sessions = await getAllSessions();
   const now = Date.now();
 
@@ -503,12 +597,19 @@ async function reconcileExpiredSessions() {
     );
     await browser.storage.session.set({ [key]: nextSession });
 
-    await sendTabMessage(tabId, {
-      type: "RESET_TIMER",
-      remainingMs: nextSession.remainingMs,
-      active: await isTabActiveAndFocused(tabId),
-      requireHoverTarget: config.requireHoverTarget
-    });
+    if (dailyLockState.locked) {
+      await sendTabMessage(tabId, {
+        type: "SHOW_DAILY_LOCK",
+        unlockAt: dailyLockState.unlockAt
+      });
+    } else {
+      await sendTabMessage(tabId, {
+        type: "RESET_TIMER",
+        remainingMs: nextSession.remainingMs,
+        active: await isTabActiveAndFocused(tabId),
+        requireHoverTarget: config.requireHoverTarget
+      });
+    }
   }
 
   await scheduleSessionResetAlarm();
@@ -525,6 +626,10 @@ if (browser.alarms) {
       reconcileExpiredSessions().catch((error) => {
         console.warn("[Airlock] Failed to reset expired sessions:", error);
       });
+    } else if (alarm.name === DAILY_LOCK_BOUNDARY_ALARM) {
+      reconcileDailyLockBoundary().catch((error) => {
+        console.warn("[Airlock] Failed to apply daily lock boundary:", error);
+      });
     }
   });
 }
@@ -535,6 +640,18 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   if (changes.enabled || changes.sites || changes.delayMinutes || changes.resetHours) {
     reconcileExpiredSessions().catch((error) => {
       console.warn("[Airlock] Failed to reconcile expired sessions:", error);
+    });
+  }
+
+  if (
+    changes.enabled ||
+    changes.sites ||
+    changes.dailyLockEnabled ||
+    changes.dailyLockStart ||
+    changes.dailyLockEnd
+  ) {
+    reconcileDailyLockBoundary().catch((error) => {
+      console.warn("[Airlock] Failed to reconcile daily lock settings:", error);
     });
   }
 });
@@ -655,6 +772,16 @@ async function handleContentReady(tabId, domain) {
   if (!config.enabled || !isDomainTracked(domain, config.sites)) {
     return {
       type: "NO_OVERLAY",
+      active: active,
+      requireHoverTarget: config.requireHoverTarget
+    };
+  }
+
+  const dailyLockState = getDailyLockState(config);
+  if (dailyLockState.locked) {
+    return {
+      type: "SHOW_DAILY_LOCK",
+      unlockAt: dailyLockState.unlockAt,
       active: active,
       requireHoverTarget: config.requireHoverTarget
     };
