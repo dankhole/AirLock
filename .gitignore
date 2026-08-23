@@ -6,3 +6,4 @@ store/
 .claude/
 CLAUDE.md
 docs/
+.codex/config.toml
