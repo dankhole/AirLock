@@ -1,10 +1,10 @@
 # Airlock
 
-A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional friction before accessing distracting websites. When you navigate to a tracked site, the page is covered with a calming countdown overlay. The timer only counts down while the tab is actively focused -- switching away pauses it. Daily locks and one-hour cooldowns can make tracked sites completely unavailable.
+A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional friction before accessing distracting websites. When you navigate to a tracked site, the page is covered with a calming countdown overlay. The timer only counts down while the tab is actively focused -- switching away pauses it. Per-site daily time limits, scheduled daily locks, and one-hour cooldowns can make tracked sites unavailable.
 
 ## How It Works
 
-1. You configure a list of websites, a wait duration in minutes, a reset window in hours, optional hover-target enforcement, and an optional daily lock window via the popup
+1. You configure a list of websites, optional per-site daily limits, a wait duration in minutes, a reset window in hours, optional hover-target enforcement, and an optional daily lock window via the popup
 2. When any tab navigates to a tracked site, a fullscreen overlay appears with a countdown timer and breathing focus target
 3. The timer **pauses** when you switch tabs, switch windows, or minimize the browser
 4. The timer **resumes** when you return to the tab, and optionally only while the pointer is on the overlay target
@@ -17,8 +17,9 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 11. Guarded settings waits only count down while the settings popup is open and the settings hover target is active
 12. During the daily lock window, tracked sites show a non-dismissible lock overlay until the configured local end time
 13. Daily lock windows can run within one day or across midnight; open tabs update automatically at both boundaries
-14. Starting a cooldown blocks every tracked site for one hour, even if the main Airlock toggle is turned off
-15. Ending a cooldown early, disabling a daily lock, or shortening its window requires hovering the popup target for the configured unlock hold; making a daily lock longer applies immediately
+14. A per-site daily limit counts only focused, visible time after the wait overlay is dismissed, is shared across matching tabs and subdomains, and resets at local midnight
+15. Starting a cooldown blocks every tracked site for one hour, even if the main Airlock toggle is turned off
+16. Ending a cooldown early, disabling a daily lock, or shortening its window requires hovering the popup target for the configured unlock hold; making a daily lock longer applies immediately
 
 Adding tracked sites and increasing the delay still apply immediately.
 Increasing time settings and turning on hover-target enforcement require confirmation. Changes that weaken restrictions use the unlock hold configured in the popup.
@@ -86,6 +87,13 @@ After making source changes, run `npm run build` and reload the extension.
 - During the window, verify that the overlay shows the local unlock time and has no Continue button
 - Leave a tracked tab open across either boundary and verify that it locks or unlocks automatically
 - After unlock, verify that an incomplete wait session resumes and a previously completed session remains complete
+
+### Daily time limits
+- Enter a value in the **min/day** field beside a tracked site
+- Complete the normal wait, then keep the site focused until its allowance is exhausted
+- Verify that matching tabs show a non-dismissible limit overlay and that the popup reports today's usage
+- Verify that unfocused, hidden, waiting, and scheduled-lock time does not count
+- Raising or removing a limit uses the same guarded settings countdown as other less-restrictive changes
 
 ### Cooldown
 - Click **Start 1 hour** and verify every tracked site immediately shows a non-dismissible cooldown overlay

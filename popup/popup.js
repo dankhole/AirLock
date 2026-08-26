@@ -30,6 +30,8 @@ let sites = [];
 let delayMinutes = 1;
 let resetHours = 24;
 let requireHoverTarget = false;
+let dailyLimits = {};
+let dailyUsage = { date: "", sites: {} };
 let guardMinutes = 1;
 let cooldownUntil = null;
 let dailyLockEnabled = false;
@@ -53,6 +55,8 @@ browser.storage.local.get([
   "delayMinutes",
   "resetHours",
   "requireHoverTarget",
+  "dailyLimits",
+  "dailyUsage",
   "guardMinutes",
   "cooldownUntil",
   "dailyLockEnabled",
@@ -64,6 +68,8 @@ browser.storage.local.get([
   delayMinutes = normalizeDelayMinutes(result.delayMinutes || 1);
   resetHours = normalizeResetHours(result.resetHours || 24);
   requireHoverTarget = result.requireHoverTarget === true;
+  dailyLimits = normalizeDailyLimits(result.dailyLimits);
+  dailyUsage = normalizeDailyUsage(result.dailyUsage);
   guardMinutes = normalizeGuardMinutes(result.guardMinutes || 1);
   cooldownUntil = normalizeCooldownUntil(result.cooldownUntil);
   dailyLockStart = dailyLockApi.normalizeTimeOfDay(
@@ -444,10 +450,47 @@ function renderSites() {
     const li = document.createElement("li");
     li.className = "site-item";
 
-    const span = document.createElement("span");
-    span.textContent = site;
+    const info = document.createElement("div");
+    info.className = "site-info";
+
+    const domain = document.createElement("span");
+    domain.className = "site-domain";
+    domain.textContent = site;
+
+    const usage = document.createElement("span");
+    usage.className = "site-usage";
+    usage.dataset.site = site;
+    usage.textContent = formatSiteUsage(site);
+
+    info.appendChild(domain);
+    info.appendChild(usage);
+
+    const actions = document.createElement("div");
+    actions.className = "site-actions";
+
+    const limitGroup = document.createElement("label");
+    limitGroup.className = "site-limit-group";
+    limitGroup.title = "Daily time limit in minutes; leave blank for no limit";
+
+    const limitInput = document.createElement("input");
+    limitInput.className = "site-limit-input";
+    limitInput.type = "number";
+    limitInput.min = "1";
+    limitInput.max = "1440";
+    limitInput.placeholder = "—";
+    limitInput.value = dailyLimits[site] || "";
+    limitInput.setAttribute("aria-label", "Daily limit for " + site + " in minutes");
+    limitInput.disabled = Boolean(pendingConfigChange);
+    limitInput.addEventListener("change", () => changeDailyLimit(site, limitInput));
+
+    const limitUnit = document.createElement("span");
+    limitUnit.textContent = "min/day";
+
+    limitGroup.appendChild(limitInput);
+    limitGroup.appendChild(limitUnit);
 
     const btn = document.createElement("button");
+    btn.className = "site-remove";
     btn.textContent = "\u00d7";
     btn.title = "Remove";
     btn.disabled = Boolean(pendingConfigChange);
@@ -468,8 +511,10 @@ function renderSites() {
       }
     });
 
-    li.appendChild(span);
-    li.appendChild(btn);
+    actions.appendChild(limitGroup);
+    actions.appendChild(btn);
+    li.appendChild(info);
+    li.appendChild(actions);
     siteList.appendChild(li);
   });
 
@@ -477,6 +522,56 @@ function renderSites() {
 
   renderAddCurrentButton();
   renderCooldown();
+}
+
+function changeDailyLimit(site, input) {
+  if (pendingConfigChange) {
+    input.value = dailyLimits[site] || "";
+    return;
+  }
+
+  const currentLimit = dailyLimits[site] || null;
+  const nextLimit = input.value.trim() === "" ? null : normalizeDailyLimitMinutes(input.value);
+  if (nextLimit === null && input.value.trim() !== "") {
+    input.value = currentLimit || "";
+    input.setCustomValidity("Choose a value from 1 to 1440 minutes.");
+    input.reportValidity();
+    return;
+  }
+  input.setCustomValidity("");
+
+  if (nextLimit === currentLimit) return;
+
+  const isMorePermissive = currentLimit !== null && (nextLimit === null || nextLimit > currentLimit);
+  if (isMorePermissive) {
+    input.value = currentLimit;
+    startPendingConfigChange({
+      type: "changeDailyLimit",
+      site: site,
+      dailyLimitMinutes: nextLimit
+    });
+    return;
+  }
+
+  dailyLimits = { ...dailyLimits, [site]: nextLimit };
+  if (nextLimit === null) delete dailyLimits[site];
+  input.value = nextLimit || "";
+  browser.storage.local.set({ dailyLimits: dailyLimits });
+  updateSiteUsageLabels();
+}
+
+function formatSiteUsage(site) {
+  const limit = dailyLimits[site];
+  if (!limit) return "No daily limit";
+
+  const usedMinutes = Math.min(limit, Math.floor(getTodayUsageMs(site) / 60000));
+  return usedMinutes + " of " + limit + " min used today";
+}
+
+function updateSiteUsageLabels() {
+  siteList.querySelectorAll(".site-usage").forEach((label) => {
+    label.textContent = formatSiteUsage(label.dataset.site);
+  });
 }
 
 function clearPendingRemove() {
@@ -623,6 +718,16 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     renderSites();
   }
 
+  if (changes.dailyLimits) {
+    dailyLimits = normalizeDailyLimits(changes.dailyLimits.newValue);
+    renderSites();
+  }
+
+  if (changes.dailyUsage) {
+    dailyUsage = normalizeDailyUsage(changes.dailyUsage.newValue);
+    updateSiteUsageLabels();
+  }
+
   if (changes.pendingConfigChange) {
     const nextPendingConfigChange = changes.pendingConfigChange.newValue || null;
     if (
@@ -653,6 +758,47 @@ function normalizeResetHours(value) {
   if (isNaN(hours) || hours < 1) hours = 1;
   if (hours > 8760) hours = 8760;
   return hours;
+}
+
+function normalizeDailyLimitMinutes(value) {
+  const minutes = parseInt(value, 10);
+  if (isNaN(minutes) || minutes < 1 || minutes > 1440) return null;
+  return minutes;
+}
+
+function normalizeDailyLimits(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([site, minutes]) => [site, normalizeDailyLimitMinutes(minutes)])
+      .filter(([, minutes]) => minutes !== null)
+  );
+}
+
+function getLocalDateKey(now = Date.now()) {
+  const date = new Date(now);
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+}
+
+function normalizeDailyUsage(value) {
+  if (
+    !value ||
+    value.date !== getLocalDateKey() ||
+    !value.sites ||
+    typeof value.sites !== "object"
+  ) {
+    return { date: getLocalDateKey(), sites: {} };
+  }
+  return value;
+}
+
+function getTodayUsageMs(site) {
+  if (dailyUsage.date !== getLocalDateKey()) return 0;
+  return Math.max(0, Number(dailyUsage.sites[site]) || 0);
 }
 
 function normalizeGuardMinutes(value) {
@@ -704,6 +850,9 @@ function setControlsLocked(locked) {
   siteList.querySelectorAll("button").forEach((btn) => {
     btn.disabled = locked;
   });
+  siteList.querySelectorAll("input").forEach((input) => {
+    input.disabled = locked;
+  });
 }
 
 function renderPendingConfigChange() {
@@ -744,6 +893,12 @@ function getPendingConfigTitle(pending) {
 
   if (pending.type === "disableHoverTarget") {
     return "Disabling hover target";
+  }
+
+  if (pending.type === "changeDailyLimit") {
+    return pending.dailyLimitMinutes === null
+      ? "Removing daily limit for " + pending.site
+      : "Increasing daily limit for " + pending.site;
   }
 
   if (pending.type === "reduceGuardMinutes") {

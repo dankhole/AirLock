@@ -156,6 +156,8 @@ function baseConfig(overrides = {}) {
     delayMinutes: 1,
     resetHours: 24,
     requireHoverTarget: false,
+    dailyLimits: {},
+    dailyUsage: { date: localDateKey(), sites: {} },
     guardMinutes: 1,
     cooldownUntil: null,
     dailyLockEnabled: false,
@@ -163,6 +165,14 @@ function baseConfig(overrides = {}) {
     dailyLockEnd: "07:00",
     ...overrides
   };
+}
+
+function localDateKey(date = new Date()) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
 }
 
 test("daily lock overrides session creation and schedules an unlock boundary", async () => {
@@ -210,6 +220,68 @@ test("unlocking restores the underlying completed or incomplete session state", 
   state.localData.dailyLockEnabled = false;
   const unlockedResponse = await context.handleContentReady(7, "example.com");
   assert.equal(unlockedResponse.type, "NO_OVERLAY");
+});
+
+test("a site is blocked after its daily usage reaches its configured limit", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({
+      dailyLimits: { "example.com": 1 },
+      dailyUsage: {
+        date: localDateKey(),
+        sites: { "example.com": 59 * 1000 }
+      }
+    })
+  );
+
+  const usageResponse = await context.handleDailyUsageUpdate(7, "news.example.com", 1000);
+  const contentResponse = await context.handleContentReady(7, "news.example.com");
+
+  assert.equal(usageResponse.reached, true);
+  assert.equal(usageResponse.remainingMs, 0);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 60 * 1000);
+  assert.equal(contentResponse.type, "SHOW_DAILY_LIMIT");
+  assert.equal(contentResponse.limitMinutes, 1);
+  assert.ok(contentResponse.resetAt > Date.now());
+  assert.ok(
+    state.tabMessages.some((entry) => entry.message.type === "RECHECK_CONFIG")
+  );
+});
+
+test("daily usage from a previous local day does not block the site", async () => {
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const { context } = await loadBackground(
+    baseConfig({
+      dailyLimits: { "example.com": 1 },
+      dailyUsage: {
+        date: localDateKey(yesterday),
+        sites: { "example.com": 60 * 1000 }
+      }
+    })
+  );
+
+  const response = await context.handleContentReady(7, "example.com");
+
+  assert.equal(response.type, "SHOW_OVERLAY");
+  assert.equal(response.dailyUsageRemainingMs, 60 * 1000);
+});
+
+test("raising a daily limit uses the guarded settings countdown", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({ dailyLimits: { "example.com": 30 } })
+  );
+
+  const response = await context.startPendingConfigChange({
+    type: "changeDailyLimit",
+    site: "example.com",
+    dailyLimitMinutes: 60
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.applied, false);
+  assert.equal(response.pending.type, "changeDailyLimit");
+  assert.equal(response.pending.remainingMs, 60 * 1000);
+  assert.equal(state.localData.dailyLimits["example.com"], 30);
 });
 
 test("cooldown blocks tracked sites for an hour even when Airlock is toggled off", async () => {

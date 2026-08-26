@@ -349,7 +349,13 @@ body {
   font-size: 14px;
   font-weight: 600;
   color: #555;
+  margin-bottom: 2px;
+}
+
+.sites-help {
   margin-bottom: 8px;
+  color: #999;
+  font-size: 11px;
 }
 
 /* Add Current Site Button */
@@ -372,7 +378,7 @@ body {
 
 .site-list {
   list-style: none;
-  max-height: 160px;
+  max-height: 220px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -391,7 +397,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 10px;
+  gap: 8px;
+  padding: 8px 10px;
   background: white;
   border-radius: 6px;
   border: 1px solid #e8eaf0;
@@ -404,7 +411,15 @@ body {
   background: #fef5f5;
 }
 
-.site-item span {
+.site-info {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.site-domain {
   min-width: 0;
   overflow: hidden;
   color: #333;
@@ -412,7 +427,46 @@ body {
   white-space: nowrap;
 }
 
-.site-item button {
+.site-usage {
+  overflow: hidden;
+  color: #999;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.site-limit-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: #999;
+  font-size: 10px;
+}
+
+.site-limit-input {
+  width: 47px;
+  padding: 3px 4px;
+  color: #444;
+  background: #fbfcff;
+  border: 1px solid #ddd;
+  border-radius: 5px;
+  font-size: 12px;
+  text-align: center;
+  outline: none;
+}
+
+.site-limit-input:focus {
+  border-color: #5b8def;
+}
+
+.site-remove {
   flex: 0 0 auto;
   background: none;
   border: none;
@@ -425,11 +479,11 @@ body {
   transition: color 0.15s, background 0.15s;
 }
 
-.site-item button:hover {
+.site-remove:hover {
   color: #e74c3c;
 }
 
-.site-item.confirm-remove button {
+.site-item.confirm-remove .site-remove {
   color: white;
   background: #e74c3c;
 }

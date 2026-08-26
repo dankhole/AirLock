@@ -4,6 +4,7 @@
 
 (async function () {
   const TIMER_TICK_MS = 250;
+  const DAILY_USAGE_TICK_MS = 1000;
 
   const hostname = window.location.hostname;
   if (!hostname) return;
@@ -28,7 +29,10 @@
   let response = {
     type: "NO_OVERLAY",
     active: false,
-    requireHoverTarget: config.requireHoverTarget === true
+    requireHoverTarget: config.requireHoverTarget === true,
+    dailyLimitMinutes: null,
+    dailyUsageRemainingMs: null,
+    dailyUsageResetAt: null
   };
 
   const initialCooldownActive = Number(config.cooldownUntil) > Date.now();
@@ -45,6 +49,7 @@
 
   const shouldShowTimer = response && response.type === "SHOW_OVERLAY";
   const shouldShowDailyLock = response && response.type === "SHOW_DAILY_LOCK";
+  const shouldShowDailyLimit = response && response.type === "SHOW_DAILY_LIMIT";
   const shouldShowCooldown = response && response.type === "SHOW_COOLDOWN";
 
   // --- State ---
@@ -52,11 +57,26 @@
     ? "cooldown"
     : shouldShowDailyLock
       ? "dailyLock"
-      : shouldShowTimer
-        ? "timer"
-        : null;
+      : shouldShowDailyLimit
+        ? "dailyLimit"
+        : shouldShowTimer
+          ? "timer"
+          : null;
   let remainingMs = shouldShowTimer ? response.remainingMs : 0;
-  let dailyLockUntil = shouldShowDailyLock || shouldShowCooldown ? response.unlockAt : null;
+  let dailyLockUntil = shouldShowDailyLock || shouldShowCooldown
+    ? response.unlockAt
+    : shouldShowDailyLimit
+      ? response.resetAt
+      : null;
+  let dailyLimitMinutes = response && Number.isFinite(response.dailyLimitMinutes)
+    ? response.dailyLimitMinutes
+    : null;
+  let dailyUsageRemainingMs = response && Number.isFinite(response.dailyUsageRemainingMs)
+    ? response.dailyUsageRemainingMs
+    : null;
+  let dailyUsageResetAt = response && Number.isFinite(response.dailyUsageResetAt)
+    ? response.dailyUsageResetAt
+    : null;
   let backgroundActive = response ? response.active !== false : false;
   let requireHoverTarget = shouldShowTimer
     ? response.requireHoverTarget === true
@@ -69,6 +89,9 @@
   let timerTimeout = null;
   let dailyLockTimeout = null;
   let activeStateInterval = null;
+  let dailyUsageInterval = null;
+  let dailyUsageTickAt = null;
+  let dailyUsageUpdateInFlight = false;
   let activeStateRefreshInFlight = false;
   let configRecheckInFlight = false;
   let configRecheckPending = false;
@@ -120,7 +143,8 @@
         .backdrop.visible {
           opacity: 1;
         }
-        .backdrop.daily-lock {
+        .backdrop.daily-lock,
+        .backdrop.daily-limit {
           background: rgba(24, 14, 10, 0.98);
         }
         .backdrop.cooldown {
@@ -189,11 +213,13 @@
           background: rgba(91, 141, 239, 0.46);
           border-color: rgba(255, 255, 255, 0.72);
         }
-        .backdrop.daily-lock .breathing-circle {
+        .backdrop.daily-lock .breathing-circle,
+        .backdrop.daily-limit .breathing-circle {
           background: rgba(249, 115, 22, 0.26);
           border-color: rgba(251, 146, 60, 0.5);
         }
-        .backdrop.daily-lock .breathing-circle::after {
+        .backdrop.daily-lock .breathing-circle::after,
+        .backdrop.daily-limit .breathing-circle::after {
           background: rgba(249, 115, 22, 0.28);
         }
         .backdrop.cooldown .breathing-circle {
@@ -332,8 +358,10 @@
     if (!timerEl) return;
 
     const isDailyLock = overlayMode === "dailyLock";
+    const isDailyLimit = overlayMode === "dailyLimit";
     const isCooldown = overlayMode === "cooldown";
     backdrop.classList.toggle("daily-lock", isDailyLock);
+    backdrop.classList.toggle("daily-limit", isDailyLimit);
     backdrop.classList.toggle("cooldown", isCooldown);
 
     if (isDailyLock || isCooldown) {
@@ -345,6 +373,15 @@
           ? "All tracked sites blocked · access resumes automatically"
           : "Daily lock · access resumes automatically"
       );
+      setContinueVisible(false);
+      return;
+    }
+
+    if (isDailyLimit) {
+      setMessageText("Daily limit reached");
+      setTimerText(formatDailyLimit(dailyLimitMinutes));
+      setTimerPaused(false);
+      setPausedLabelText("Access resets at " + formatClockTime(dailyLockUntil));
       setContinueVisible(false);
       return;
     }
@@ -365,6 +402,16 @@
       setPausedLabelText("");
       setContinueVisible(false);
     }
+  }
+
+  function formatDailyLimit(minutes) {
+    if (!Number.isFinite(minutes)) return "Limit reached";
+    if (minutes < 60) return minutes + " min today";
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return remainingMinutes === 0
+      ? hours + (hours === 1 ? " hour today" : " hours today")
+      : hours + "h " + remainingMinutes + "m today";
   }
 
   function setMessageText(text) {
@@ -418,6 +465,7 @@
     clearTimerTimeout();
     clearDailyLockTimeout();
     stopActiveStatePolling();
+    stopDailyUsageTracking();
     running = false;
     overlayMode = null;
     dailyLockUntil = null;
@@ -444,6 +492,7 @@
       } catch {
         // Extension context may be invalidated
       }
+      startDailyUsageTracking();
     }
   }
 
@@ -467,6 +516,7 @@
   function showOverlay(nextRemainingMs, active = backgroundActive) {
     clearTimerTimeout();
     clearDailyLockTimeout();
+    stopDailyUsageTracking();
 
     overlayMode = "timer";
     dailyLockUntil = null;
@@ -494,6 +544,11 @@
     showHardLock("dailyLock", unlockAt);
   }
 
+  function showDailyLimit(resetAt, limitMinutes) {
+    dailyLimitMinutes = Number.isFinite(limitMinutes) ? limitMinutes : dailyLimitMinutes;
+    showHardLock("dailyLimit", resetAt);
+  }
+
   function showCooldown(unlockAt) {
     showHardLock("cooldown", unlockAt);
   }
@@ -507,6 +562,7 @@
 
     clearDailyLockTimeout();
     stopActiveStatePolling();
+    stopDailyUsageTracking();
     overlayMode = mode;
     dailyLockUntil = unlockAt;
     running = false;
@@ -535,7 +591,7 @@
   function scheduleDailyLockRelease() {
     clearDailyLockTimeout();
     if (
-      (overlayMode !== "dailyLock" && overlayMode !== "cooldown") ||
+      !["dailyLock", "dailyLimit", "cooldown"].includes(overlayMode) ||
       typeof dailyLockUntil !== "number"
     ) return;
 
@@ -777,6 +833,82 @@
     }
   }
 
+  // --- Daily Usage Tracking ---
+
+  function configureDailyUsage(nextResponse) {
+    dailyLimitMinutes = nextResponse && Number.isFinite(nextResponse.dailyLimitMinutes)
+      ? nextResponse.dailyLimitMinutes
+      : null;
+    dailyUsageRemainingMs = nextResponse && Number.isFinite(nextResponse.dailyUsageRemainingMs)
+      ? nextResponse.dailyUsageRemainingMs
+      : null;
+    dailyUsageResetAt = nextResponse && Number.isFinite(nextResponse.dailyUsageResetAt)
+      ? nextResponse.dailyUsageResetAt
+      : null;
+  }
+
+  function startDailyUsageTracking() {
+    stopDailyUsageTracking();
+    if (overlayMode !== null || dailyLimitMinutes === null) return;
+
+    dailyUsageTickAt = Date.now();
+    dailyUsageInterval = setInterval(reportDailyUsage, DAILY_USAGE_TICK_MS);
+  }
+
+  function stopDailyUsageTracking() {
+    if (dailyUsageInterval) {
+      clearInterval(dailyUsageInterval);
+      dailyUsageInterval = null;
+    }
+    dailyUsageTickAt = null;
+  }
+
+  function reportDailyUsage() {
+    const now = Date.now();
+    const previousTickAt = dailyUsageTickAt || now;
+
+    if (
+      overlayMode !== null ||
+      dailyLimitMinutes === null ||
+      !isPageActive()
+    ) {
+      dailyUsageTickAt = now;
+      return;
+    }
+
+    if (dailyUsageUpdateInFlight) return;
+
+    const elapsedMs = Math.max(0, now - previousTickAt);
+    if (elapsedMs <= 0) return;
+
+    dailyUsageTickAt = now;
+    dailyUsageUpdateInFlight = true;
+    browser.runtime
+      .sendMessage({
+        type: "DAILY_USAGE_UPDATE",
+        domain: hostname,
+        elapsedMs: elapsedMs
+      })
+      .then((result) => {
+        if (!result || result.ok !== true) return;
+        dailyUsageRemainingMs = Number.isFinite(result.remainingMs)
+          ? result.remainingMs
+          : dailyUsageRemainingMs;
+        dailyUsageResetAt = Number.isFinite(result.resetAt)
+          ? result.resetAt
+          : dailyUsageResetAt;
+        if (result.reached) {
+          showDailyLimit(result.resetAt, result.limitMinutes);
+        }
+      })
+      .catch(() => {
+        // Usage will resume when the background is available again.
+      })
+      .finally(() => {
+        dailyUsageUpdateInFlight = false;
+      });
+  }
+
   function applyConfigResponse(nextResponse) {
     if (nextResponse && nextResponse.type === "SHOW_COOLDOWN") {
       showCooldown(nextResponse.unlockAt);
@@ -784,17 +916,27 @@
     }
 
     if (nextResponse && nextResponse.type === "SHOW_DAILY_LOCK") {
+      configureDailyUsage(null);
       showDailyLock(nextResponse.unlockAt);
       return;
     }
 
+    if (nextResponse && nextResponse.type === "SHOW_DAILY_LIMIT") {
+      configureDailyUsage(null);
+      showDailyLimit(nextResponse.resetAt, nextResponse.limitMinutes);
+      return;
+    }
+
     if (nextResponse && nextResponse.type === "SHOW_OVERLAY") {
+      configureDailyUsage(nextResponse);
       setRequireHoverTarget(nextResponse.requireHoverTarget);
       showOverlay(nextResponse.remainingMs, nextResponse.active);
       return;
     }
 
+    configureDailyUsage(nextResponse);
     dismissOverlay({ notifyDone: false });
+    startDailyUsageTracking();
   }
 
   function recheckConfig() {
@@ -815,7 +957,7 @@
       })
       .then(applyConfigResponse)
       .catch(() => {
-        if (overlayMode === "dailyLock" || overlayMode === "cooldown") {
+        if (["dailyLock", "dailyLimit", "cooldown"].includes(overlayMode)) {
           clearDailyLockTimeout();
           dailyLockTimeout = setTimeout(recheckConfig, 5000);
         }
@@ -856,10 +998,13 @@
     } else if (message.type === "ACTIVE_STATE") {
       setBackgroundActive(message.active);
     } else if (message.type === "RESET_TIMER") {
+      configureDailyUsage(message);
       setRequireHoverTarget(message.requireHoverTarget);
       showOverlay(message.remainingMs, message.active);
     } else if (message.type === "SHOW_DAILY_LOCK") {
       showDailyLock(message.unlockAt);
+    } else if (message.type === "SHOW_DAILY_LIMIT") {
+      showDailyLimit(message.resetAt, message.limitMinutes);
     } else if (message.type === "SHOW_COOLDOWN") {
       showCooldown(message.unlockAt);
     } else if (message.type === "RECHECK_CONFIG") {
@@ -895,11 +1040,15 @@
 
   // --- Start ---
 
-  if (shouldShowTimer) {
+  if (shouldShowCooldown) {
+    showCooldown(response.unlockAt);
+  } else if (shouldShowTimer) {
     showOverlay(response.remainingMs, response.active);
   } else if (shouldShowDailyLock) {
     showDailyLock(response.unlockAt);
-  } else if (shouldShowCooldown) {
-    showCooldown(response.unlockAt);
+  } else if (shouldShowDailyLimit) {
+    showDailyLimit(response.resetAt, response.limitMinutes);
+  } else {
+    startDailyUsageTracking();
   }
 })();
