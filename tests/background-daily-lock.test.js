@@ -156,6 +156,8 @@ function baseConfig(overrides = {}) {
     delayMinutes: 1,
     resetHours: 24,
     requireHoverTarget: false,
+    guardMinutes: 1,
+    cooldownUntil: null,
     dailyLockEnabled: false,
     dailyLockStart: "22:00",
     dailyLockEnd: "07:00",
@@ -208,4 +210,65 @@ test("unlocking restores the underlying completed or incomplete session state", 
   state.localData.dailyLockEnabled = false;
   const unlockedResponse = await context.handleContentReady(7, "example.com");
   assert.equal(unlockedResponse.type, "NO_OVERLAY");
+});
+
+test("cooldown blocks tracked sites for an hour even when Airlock is toggled off", async () => {
+  const { context, state } = await loadBackground(baseConfig({ enabled: false }));
+  const before = Date.now();
+
+  const started = await context.startCooldown();
+  const response = await context.handleContentReady(7, "example.com");
+
+  assert.equal(started.ok, true);
+  assert.ok(started.cooldownUntil >= before + 60 * 60 * 1000);
+  assert.equal(response.type, "SHOW_COOLDOWN");
+  assert.equal(response.unlockAt, state.localData.cooldownUntil);
+  assert.ok(state.alarms.has("airlock.cooldownBoundary"));
+});
+
+test("ending a cooldown early requires the full settings hold", async () => {
+  const cooldownUntil = Date.now() + 60 * 60 * 1000;
+  const { context, state } = await loadBackground(baseConfig({ cooldownUntil: cooldownUntil }));
+
+  const pending = await context.startPendingConfigChange({ type: "endCooldown" });
+  assert.equal(pending.applied, false);
+  assert.equal(pending.pending.remainingMs, 60 * 1000);
+  assert.equal(state.localData.cooldownUntil, cooldownUntil);
+
+  await context.advancePendingConfigChange(30 * 1000);
+  assert.equal(state.localData.cooldownUntil, cooldownUntil);
+
+  await context.advancePendingConfigChange(30 * 1000);
+  assert.equal(state.localData.cooldownUntil, null);
+  assert.equal(state.localData.pendingConfigChange, undefined);
+});
+
+test("shortening a daily lock is guarded while lengthening it applies immediately", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({
+      dailyLockEnabled: true,
+      dailyLockStart: "22:00",
+      dailyLockEnd: "07:00"
+    })
+  );
+
+  const shorter = await context.startPendingConfigChange({
+    type: "changeDailyLockSchedule",
+    dailyLockStart: "23:00",
+    dailyLockEnd: "07:00"
+  });
+  assert.equal(shorter.applied, false);
+  assert.equal(state.localData.dailyLockStart, "22:00");
+
+  await context.advancePendingConfigChange(60 * 1000);
+  assert.equal(state.localData.dailyLockStart, "23:00");
+
+  const longer = await context.startPendingConfigChange({
+    type: "changeDailyLockSchedule",
+    dailyLockStart: "21:00",
+    dailyLockEnd: "07:00"
+  });
+  assert.equal(longer.applied, true);
+  assert.equal(state.localData.dailyLockStart, "21:00");
+  assert.equal(state.localData.pendingConfigChange, undefined);
 });

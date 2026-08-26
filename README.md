@@ -1,6 +1,6 @@
 # Airlock
 
-A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional friction before accessing distracting websites. When you navigate to a tracked site, the page is covered with a calming countdown overlay. The timer only counts down while the tab is actively focused -- switching away pauses it. An optional daily lock makes tracked sites completely unavailable during a recurring time window.
+A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional friction before accessing distracting websites. When you navigate to a tracked site, the page is covered with a calming countdown overlay. The timer only counts down while the tab is actively focused -- switching away pauses it. Daily locks and one-hour cooldowns can make tracked sites completely unavailable.
 
 ## How It Works
 
@@ -13,13 +13,15 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 7. Opening a new tab to the same site starts a fresh timer
 8. Navigating within a site after completing the timer does not re-trigger it until the configured reset window passes
 9. A tracked tab left open past the configured reset window requires a fresh wait
-10. Removing a tracked site or lowering the wait duration waits for the current wait duration before applying
+10. Removing a tracked site or lowering the wait duration requires the separately configured unlock hold before applying
 11. Guarded settings waits only count down while the settings popup is open and the settings hover target is active
 12. During the daily lock window, tracked sites show a non-dismissible lock overlay until the configured local end time
 13. Daily lock windows can run within one day or across midnight; open tabs update automatically at both boundaries
+14. Starting a cooldown blocks every tracked site for one hour, even if the main Airlock toggle is turned off
+15. Ending a cooldown early, disabling a daily lock, or shortening its window requires hovering the popup target for the configured unlock hold; making a daily lock longer applies immediately
 
 Adding tracked sites and increasing the delay still apply immediately.
-Increasing time settings and turning on hover-target enforcement require confirmation. Turning off hover-target enforcement waits for the current wait duration before applying.
+Increasing time settings and turning on hover-target enforcement require confirmation. Changes that weaken restrictions use the unlock hold configured in the popup.
 
 Domain matching: entering `reddit.com` will match `reddit.com`, `www.reddit.com`, `old.reddit.com`, etc.
 
@@ -85,12 +87,18 @@ After making source changes, run `npm run build` and reload the extension.
 - Leave a tracked tab open across either boundary and verify that it locks or unlocks automatically
 - After unlock, verify that an incomplete wait session resumes and a previously completed session remains complete
 
+### Cooldown
+- Click **Start 1 hour** and verify every tracked site immediately shows a non-dismissible cooldown overlay
+- Toggle Airlock off and verify the cooldown remains active
+- Click **End early**, hover the orange popup target for the configured unlock hold, and verify access resumes only after the hold completes
+- Shorten an enabled daily lock and verify the same hold is required; lengthen it and verify the update applies immediately
+
 ### Persistence
 - Refresh during countdown -- timer resumes, not reset
 - Open the same site in a new tab -- fresh timer
 - Leave a completed tracked tab open past the configured reset window -- timer resets and appears again
 - Close and reopen the popup during a guarded settings wait -- remaining time is preserved
-- Toggle extension off while overlay is active -- overlay removed
+- Toggle the extension off during a normal wait -- overlay removed (an active cooldown remains enforced)
 
 ## Architecture
 
@@ -114,7 +122,7 @@ shared/daily-lock.js  <-- Daily schedule calculation shared with the popup
 |---|---|
 | `storage` | Persist config and timer sessions locally |
 | `activeTab` | Read current tab URL for the "Track this site" button |
-| `alarms` | Apply delayed settings changes, configured tab resets, and daily lock boundaries |
+| `alarms` | Apply delayed settings changes, configured tab resets, daily lock boundaries, and cooldown expiry |
 
 ## Project Structure
 

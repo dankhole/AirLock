@@ -72,3 +72,10 @@ test("does not schedule boundaries when the daily lock is disabled", () => {
   assert.equal(state.locked, false);
   assert.equal(state.nextBoundaryAt, null);
 });
+
+test("calculates scheduled duration across midnight", () => {
+  assert.equal(dailyLock.getDurationMinutes("22:00", "07:00"), 9 * 60);
+  assert.equal(dailyLock.getDurationMinutes("23:00", "07:00"), 8 * 60);
+  assert.equal(dailyLock.getDurationMinutes("09:00", "17:30"), 8 * 60 + 30);
+  assert.equal(dailyLock.getDurationMinutes("09:00", "09:00"), 0);
+});

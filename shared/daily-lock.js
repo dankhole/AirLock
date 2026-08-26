@@ -52,6 +52,14 @@
     return next.getTime();
   }
 
+  function getDurationMinutes(startValue, endValue) {
+    const start = parseTimeOfDay(startValue);
+    const end = parseTimeOfDay(endValue);
+    if (!start || !end || start.minuteOfDay === end.minuteOfDay) return 0;
+
+    return (end.minuteOfDay - start.minuteOfDay + 24 * 60) % (24 * 60);
+  }
+
   function getState(config, nowValue) {
     const now = new Date(nowValue === undefined ? Date.now() : nowValue);
     const enabled = config && config.enabled === true;
@@ -94,6 +102,7 @@
     DEFAULT_END: DEFAULT_END,
     parseTimeOfDay: parseTimeOfDay,
     normalizeTimeOfDay: normalizeTimeOfDay,
+    getDurationMinutes: getDurationMinutes,
     getNextOccurrence: getNextOccurrence,
     getState: getState
   };

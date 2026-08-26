@@ -10,7 +10,12 @@
 
   let config;
   try {
-    config = await browser.storage.local.get(["enabled", "sites", "requireHoverTarget"]);
+    config = await browser.storage.local.get([
+      "enabled",
+      "sites",
+      "requireHoverTarget",
+      "cooldownUntil"
+    ]);
   } catch (e) {
     console.warn("[Airlock] Failed to read config:", e);
     return;
@@ -26,7 +31,8 @@
     requireHoverTarget: config.requireHoverTarget === true
   };
 
-  if (config.enabled !== false && initiallyTracked) {
+  const initialCooldownActive = Number(config.cooldownUntil) > Date.now();
+  if ((config.enabled !== false || initialCooldownActive) && initiallyTracked) {
     try {
       response = await browser.runtime.sendMessage({
         type: "CONTENT_READY",
@@ -39,11 +45,18 @@
 
   const shouldShowTimer = response && response.type === "SHOW_OVERLAY";
   const shouldShowDailyLock = response && response.type === "SHOW_DAILY_LOCK";
+  const shouldShowCooldown = response && response.type === "SHOW_COOLDOWN";
 
   // --- State ---
-  let overlayMode = shouldShowDailyLock ? "dailyLock" : shouldShowTimer ? "timer" : null;
+  let overlayMode = shouldShowCooldown
+    ? "cooldown"
+    : shouldShowDailyLock
+      ? "dailyLock"
+      : shouldShowTimer
+        ? "timer"
+        : null;
   let remainingMs = shouldShowTimer ? response.remainingMs : 0;
-  let dailyLockUntil = shouldShowDailyLock ? response.unlockAt : null;
+  let dailyLockUntil = shouldShowDailyLock || shouldShowCooldown ? response.unlockAt : null;
   let backgroundActive = response ? response.active !== false : false;
   let requireHoverTarget = shouldShowTimer
     ? response.requireHoverTarget === true
@@ -109,6 +122,9 @@
         }
         .backdrop.daily-lock {
           background: rgba(24, 14, 10, 0.98);
+        }
+        .backdrop.cooldown {
+          background: rgba(15, 23, 42, 0.985);
         }
         .card {
           display: flex;
@@ -179,6 +195,13 @@
         }
         .backdrop.daily-lock .breathing-circle::after {
           background: rgba(249, 115, 22, 0.28);
+        }
+        .backdrop.cooldown .breathing-circle {
+          background: rgba(168, 85, 247, 0.26);
+          border-color: rgba(192, 132, 252, 0.5);
+        }
+        .backdrop.cooldown .breathing-circle::after {
+          background: rgba(168, 85, 247, 0.28);
         }
         @keyframes airlock-breathe {
           0%, 100% {
@@ -309,13 +332,19 @@
     if (!timerEl) return;
 
     const isDailyLock = overlayMode === "dailyLock";
+    const isCooldown = overlayMode === "cooldown";
     backdrop.classList.toggle("daily-lock", isDailyLock);
+    backdrop.classList.toggle("cooldown", isCooldown);
 
-    if (isDailyLock) {
-      setMessageText("Locked until");
+    if (isDailyLock || isCooldown) {
+      setMessageText(isCooldown ? "Cooldown until" : "Locked until");
       setTimerText(formatClockTime(dailyLockUntil));
       setTimerPaused(false);
-      setPausedLabelText("Daily lock · access resumes automatically");
+      setPausedLabelText(
+        isCooldown
+          ? "All tracked sites blocked · access resumes automatically"
+          : "Daily lock · access resumes automatically"
+      );
       setContinueVisible(false);
       return;
     }
@@ -462,6 +491,14 @@
   }
 
   function showDailyLock(unlockAt) {
+    showHardLock("dailyLock", unlockAt);
+  }
+
+  function showCooldown(unlockAt) {
+    showHardLock("cooldown", unlockAt);
+  }
+
+  function showHardLock(mode, unlockAt) {
     if (overlayMode === "timer") {
       setRunning(false, { persistPaused: true });
     } else {
@@ -470,7 +507,7 @@
 
     clearDailyLockTimeout();
     stopActiveStatePolling();
-    overlayMode = "dailyLock";
+    overlayMode = mode;
     dailyLockUntil = unlockAt;
     running = false;
     hoverTargetEngaged = false;
@@ -497,7 +534,10 @@
 
   function scheduleDailyLockRelease() {
     clearDailyLockTimeout();
-    if (overlayMode !== "dailyLock" || typeof dailyLockUntil !== "number") return;
+    if (
+      (overlayMode !== "dailyLock" && overlayMode !== "cooldown") ||
+      typeof dailyLockUntil !== "number"
+    ) return;
 
     const delay = Math.max(0, dailyLockUntil - Date.now()) + 50;
     dailyLockTimeout = setTimeout(() => {
@@ -535,9 +575,11 @@
     hoverTarget.classList.toggle("hover-target-active", hoverRequired && hoverTargetEngaged);
     hoverTarget.title = overlayMode === "dailyLock"
       ? "Daily lock active"
-      : hoverRequired
-        ? "Hover to run timer"
-        : "";
+      : overlayMode === "cooldown"
+        ? "Cooldown active"
+        : hoverRequired
+          ? "Hover to run timer"
+          : "";
   }
 
   function updateHoverTargetGate() {
@@ -736,6 +778,11 @@
   }
 
   function applyConfigResponse(nextResponse) {
+    if (nextResponse && nextResponse.type === "SHOW_COOLDOWN") {
+      showCooldown(nextResponse.unlockAt);
+      return;
+    }
+
     if (nextResponse && nextResponse.type === "SHOW_DAILY_LOCK") {
       showDailyLock(nextResponse.unlockAt);
       return;
@@ -768,7 +815,7 @@
       })
       .then(applyConfigResponse)
       .catch(() => {
-        if (overlayMode === "dailyLock") {
+        if (overlayMode === "dailyLock" || overlayMode === "cooldown") {
           clearDailyLockTimeout();
           dailyLockTimeout = setTimeout(recheckConfig, 5000);
         }
@@ -813,6 +860,8 @@
       showOverlay(message.remainingMs, message.active);
     } else if (message.type === "SHOW_DAILY_LOCK") {
       showDailyLock(message.unlockAt);
+    } else if (message.type === "SHOW_COOLDOWN") {
+      showCooldown(message.unlockAt);
     } else if (message.type === "RECHECK_CONFIG") {
       recheckConfig();
     }
@@ -821,8 +870,8 @@
   // --- Extension Toggle Listener ---
 
   browser.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === "local" && changes.enabled && changes.enabled.newValue === false) {
-      dismissOverlay({ notifyDone: false });
+    if (areaName === "local" && changes.enabled) {
+      recheckConfig();
     }
 
     if (areaName === "local" && changes.sites) {
@@ -838,6 +887,10 @@
     if (areaName === "local" && changes.requireHoverTarget) {
       setRequireHoverTarget(changes.requireHoverTarget.newValue);
     }
+
+    if (areaName === "local" && changes.cooldownUntil) {
+      recheckConfig();
+    }
   });
 
   // --- Start ---
@@ -846,5 +899,7 @@
     showOverlay(response.remainingMs, response.active);
   } else if (shouldShowDailyLock) {
     showDailyLock(response.unlockAt);
+  } else if (shouldShowCooldown) {
+    showCooldown(response.unlockAt);
   }
 })();

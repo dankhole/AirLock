@@ -5,6 +5,10 @@ const enabledToggle = document.getElementById("enabled-toggle");
 const delayInput = document.getElementById("delay-input");
 const resetInput = document.getElementById("reset-input");
 const hoverTargetToggle = document.getElementById("hover-target-toggle");
+const guardInput = document.getElementById("guard-input");
+const cooldownSection = document.querySelector(".cooldown-section");
+const cooldownStatus = document.getElementById("cooldown-status");
+const cooldownBtn = document.getElementById("cooldown-btn");
 const dailyLockToggle = document.getElementById("daily-lock-toggle");
 const dailyLockStartInput = document.getElementById("daily-lock-start");
 const dailyLockEndInput = document.getElementById("daily-lock-end");
@@ -26,6 +30,8 @@ let sites = [];
 let delayMinutes = 1;
 let resetHours = 24;
 let requireHoverTarget = false;
+let guardMinutes = 1;
+let cooldownUntil = null;
 let dailyLockEnabled = false;
 let dailyLockStart = dailyLockApi.DEFAULT_START;
 let dailyLockEnd = dailyLockApi.DEFAULT_END;
@@ -47,6 +53,8 @@ browser.storage.local.get([
   "delayMinutes",
   "resetHours",
   "requireHoverTarget",
+  "guardMinutes",
+  "cooldownUntil",
   "dailyLockEnabled",
   "dailyLockStart",
   "dailyLockEnd"
@@ -56,6 +64,8 @@ browser.storage.local.get([
   delayMinutes = normalizeDelayMinutes(result.delayMinutes || 1);
   resetHours = normalizeResetHours(result.resetHours || 24);
   requireHoverTarget = result.requireHoverTarget === true;
+  guardMinutes = normalizeGuardMinutes(result.guardMinutes || 1);
+  cooldownUntil = normalizeCooldownUntil(result.cooldownUntil);
   dailyLockStart = dailyLockApi.normalizeTimeOfDay(
     result.dailyLockStart,
     dailyLockApi.DEFAULT_START
@@ -68,10 +78,12 @@ browser.storage.local.get([
   delayInput.value = delayMinutes;
   resetInput.value = resetHours;
   hoverTargetToggle.checked = requireHoverTarget;
+  guardInput.value = guardMinutes;
   dailyLockToggle.checked = dailyLockEnabled;
   dailyLockStartInput.value = dailyLockStart;
   dailyLockEndInput.value = dailyLockEnd;
   renderDailyLockStatus();
+  renderCooldown();
 
   sites = result.sites || [];
   renderSites();
@@ -155,6 +167,33 @@ resetInput.addEventListener("change", () => {
   browser.storage.local.set({ resetHours: resetHours });
 });
 
+guardInput.addEventListener("change", () => {
+  const val = normalizeGuardMinutes(guardInput.value);
+
+  if (pendingConfigChange) {
+    guardInput.value = guardMinutes;
+    return;
+  }
+
+  if (val > guardMinutes && !confirmSettingIncrease("unlock hold", guardMinutes, val, "minute")) {
+    guardInput.value = guardMinutes;
+    return;
+  }
+
+  if (val >= guardMinutes) {
+    guardMinutes = val;
+    guardInput.value = guardMinutes;
+    browser.storage.local.set({ guardMinutes: guardMinutes });
+    return;
+  }
+
+  guardInput.value = guardMinutes;
+  startPendingConfigChange({
+    type: "reduceGuardMinutes",
+    guardMinutes: val
+  });
+});
+
 // --- Hover Target ---
 
 hoverTargetToggle.addEventListener("change", () => {
@@ -183,6 +222,30 @@ hoverTargetToggle.addEventListener("change", () => {
   });
 });
 
+// --- Cooldown ---
+
+cooldownBtn.addEventListener("click", () => {
+  if (pendingConfigChange) return;
+
+  if (isCooldownActive()) {
+    startPendingConfigChange({
+      type: "endCooldown",
+      cooldownUntil: cooldownUntil
+    });
+    return;
+  }
+
+  if (sites.length === 0) return;
+  if (!window.confirm("Start a one-hour cooldown? All tracked sites will stay blocked until it ends.")) {
+    return;
+  }
+
+  browser.runtime.sendMessage({ type: "START_COOLDOWN" }).then((response) => {
+    cooldownUntil = normalizeCooldownUntil(response && response.cooldownUntil);
+    renderCooldown();
+  });
+});
+
 // --- Daily Lock ---
 
 dailyLockToggle.addEventListener("change", () => {
@@ -198,6 +261,12 @@ dailyLockToggle.addEventListener("change", () => {
   }
 
   const nextEnabled = dailyLockToggle.checked === true;
+  if (!nextEnabled && dailyLockEnabled) {
+    dailyLockToggle.checked = dailyLockEnabled;
+    startPendingConfigChange({ type: "disableDailyLock" });
+    return;
+  }
+
   if (
     nextEnabled &&
     !window.confirm(
@@ -235,6 +304,20 @@ function saveDailyLockTimes() {
 
   const schedule = validateDailyLockInputs();
   if (!schedule) return;
+
+  const currentDuration = dailyLockApi.getDurationMinutes(dailyLockStart, dailyLockEnd);
+  const nextDuration = dailyLockApi.getDurationMinutes(schedule.start, schedule.end);
+
+  if (dailyLockEnabled && nextDuration < currentDuration) {
+    dailyLockStartInput.value = dailyLockStart;
+    dailyLockEndInput.value = dailyLockEnd;
+    startPendingConfigChange({
+      type: "changeDailyLockSchedule",
+      dailyLockStart: schedule.start,
+      dailyLockEnd: schedule.end
+    });
+    return;
+  }
 
   dailyLockStart = schedule.start;
   dailyLockEnd = schedule.end;
@@ -324,6 +407,33 @@ function formatClockTime(timestamp) {
   return new Date(timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
+function normalizeCooldownUntil(value) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > Date.now() ? timestamp : null;
+}
+
+function isCooldownActive() {
+  return typeof cooldownUntil === "number" && cooldownUntil > Date.now();
+}
+
+function renderCooldown() {
+  if (!isCooldownActive()) cooldownUntil = null;
+
+  const active = isCooldownActive();
+  cooldownSection.classList.toggle("active", active);
+  cooldownBtn.textContent = active ? "End early" : "Start 1 hour";
+
+  if (active) {
+    cooldownStatus.textContent = "All tracked sites blocked · " + formatTime(cooldownUntil - Date.now()) + " left";
+  } else if (sites.length === 0) {
+    cooldownStatus.textContent = "Add a tracked site to start a cooldown";
+  } else {
+    cooldownStatus.textContent = "Block all tracked sites for one hour";
+  }
+
+  cooldownBtn.disabled = Boolean(pendingConfigChange) || (!active && sites.length === 0);
+}
+
 // --- Site List ---
 
 function renderSites() {
@@ -366,6 +476,7 @@ function renderSites() {
   setControlsLocked(Boolean(pendingConfigChange));
 
   renderAddCurrentButton();
+  renderCooldown();
 }
 
 function clearPendingRemove() {
@@ -470,6 +581,16 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     hoverTargetToggle.checked = requireHoverTarget;
   }
 
+  if (changes.guardMinutes) {
+    guardMinutes = normalizeGuardMinutes(changes.guardMinutes.newValue || 1);
+    guardInput.value = guardMinutes;
+  }
+
+  if (changes.cooldownUntil) {
+    cooldownUntil = normalizeCooldownUntil(changes.cooldownUntil.newValue);
+    renderCooldown();
+  }
+
   if (changes.dailyLockEnabled) {
     dailyLockEnabled = changes.dailyLockEnabled.newValue === true;
   }
@@ -534,6 +655,13 @@ function normalizeResetHours(value) {
   return hours;
 }
 
+function normalizeGuardMinutes(value) {
+  let minutes = parseInt(value, 10);
+  if (isNaN(minutes) || minutes < 1) minutes = 1;
+  if (minutes > 60) minutes = 60;
+  return minutes;
+}
+
 function confirmSettingIncrease(label, currentValue, nextValue, unit) {
   const currentUnit = currentValue === 1 ? unit : unit + "s";
   const nextUnit = nextValue === 1 ? unit : unit + "s";
@@ -564,6 +692,8 @@ function setControlsLocked(locked) {
   delayInput.disabled = locked;
   resetInput.disabled = locked;
   hoverTargetToggle.disabled = locked;
+  guardInput.disabled = locked;
+  cooldownBtn.disabled = locked || (!isCooldownActive() && sites.length === 0);
   dailyLockToggle.disabled = locked;
   dailyLockStartInput.disabled = locked;
   dailyLockEndInput.disabled = locked;
@@ -614,6 +744,23 @@ function getPendingConfigTitle(pending) {
 
   if (pending.type === "disableHoverTarget") {
     return "Disabling hover target";
+  }
+
+  if (pending.type === "reduceGuardMinutes") {
+    const unit = pending.guardMinutes === 1 ? "minute" : "minutes";
+    return "Reducing settings hold to " + pending.guardMinutes + " " + unit;
+  }
+
+  if (pending.type === "endCooldown") {
+    return "Ending cooldown early";
+  }
+
+  if (pending.type === "disableDailyLock") {
+    return "Turning off daily lock";
+  }
+
+  if (pending.type === "changeDailyLockSchedule") {
+    return "Shortening daily lock";
   }
 
   return "Updating settings";
@@ -797,6 +944,7 @@ function startPendingConfigChange(change) {
       pendingConfigChange = response && response.pending ? response.pending : null;
       renderPendingConfigChange();
       renderSites();
+      renderCooldown();
     });
 }
 
@@ -808,4 +956,7 @@ document.addEventListener("visibilitychange", () => {
 
 window.addEventListener("pagehide", flushPendingConfigChange);
 
-setInterval(renderDailyLockStatus, 15000);
+setInterval(() => {
+  renderDailyLockStatus();
+  renderCooldown();
+}, 1000);

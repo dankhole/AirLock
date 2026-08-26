@@ -40,6 +40,22 @@
       </label>
     </section>
 
+    <section class="delay-section">
+      <label for="guard-input" title="Hover time required for changes that weaken a restriction">Unlock hold</label>
+      <div class="delay-input-group">
+        <input type="number" id="guard-input" min="1" max="60" value="1">
+        <span class="delay-unit">minutes</span>
+      </div>
+    </section>
+
+    <section class="cooldown-section" aria-labelledby="cooldown-title">
+      <div class="cooldown-copy">
+        <h2 id="cooldown-title">Cooldown</h2>
+        <p id="cooldown-status" aria-live="polite">Block all tracked sites for one hour</p>
+      </div>
+      <button type="button" id="cooldown-btn" class="cooldown-btn">Start 1 hour</button>
+    </section>
+
     <section class="daily-lock-section" aria-labelledby="daily-lock-title">
       <div class="daily-lock-header">
         <div>

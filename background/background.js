@@ -8,6 +8,8 @@ const DEFAULT_CONFIG = {
   delayMinutes: 1,
   resetHours: 24,
   requireHoverTarget: false,
+  guardMinutes: 1,
+  cooldownUntil: null,
   dailyLockEnabled: false,
   dailyLockStart: dailyLockApi.DEFAULT_START,
   dailyLockEnd: dailyLockApi.DEFAULT_END
@@ -17,6 +19,7 @@ const PENDING_CONFIG_CHANGE_KEY = "pendingConfigChange";
 const PENDING_CONFIG_CHANGE_ALARM = "airlock.pendingConfigChange";
 const SESSION_RESET_ALARM = "airlock.sessionReset";
 const DAILY_LOCK_BOUNDARY_ALARM = "airlock.dailyLockBoundary";
+const COOLDOWN_BOUNDARY_ALARM = "airlock.cooldownBoundary";
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 
@@ -27,6 +30,7 @@ browser.runtime.onInstalled.addListener(async () => {
   await reconcilePendingConfigChange();
   await reconcileExpiredSessions();
   await scheduleDailyLockBoundaryAlarm();
+  await scheduleCooldownBoundaryAlarm();
 });
 
 browser.runtime.onStartup.addListener(() => {
@@ -47,6 +51,7 @@ async function reconcileStartupState() {
     await reconcilePendingConfigChange();
     await reconcileExpiredSessions();
     await scheduleDailyLockBoundaryAlarm();
+    await scheduleCooldownBoundaryAlarm();
     await broadcastConfigRecheck();
   } catch (error) {
     console.warn("[Airlock] Failed to reconcile startup state:", error);
@@ -61,6 +66,8 @@ async function migrateStoredConfig() {
     "delaySeconds",
     "resetHours",
     "requireHoverTarget",
+    "guardMinutes",
+    "cooldownUntil",
     "dailyLockEnabled",
     "dailyLockStart",
     "dailyLockEnd"
@@ -91,6 +98,21 @@ async function migrateStoredConfig() {
     if (requireHoverTarget !== existing.requireHoverTarget) {
       updates.requireHoverTarget = requireHoverTarget;
     }
+  }
+
+  if (existing.guardMinutes === undefined) {
+    // Preserve the old guarded-change duration on upgrade, then let it vary independently.
+    updates.guardMinutes = clampGuardMinutes(
+      existing.delayMinutes || DEFAULT_CONFIG.guardMinutes
+    );
+  } else {
+    const guardMinutes = clampGuardMinutes(existing.guardMinutes);
+    if (guardMinutes !== existing.guardMinutes) updates.guardMinutes = guardMinutes;
+  }
+
+  const cooldownUntil = normalizeCooldownUntil(existing.cooldownUntil);
+  if (existing.cooldownUntil !== cooldownUntil) {
+    updates.cooldownUntil = cooldownUntil;
   }
 
   const dailyLockStart = dailyLockApi.normalizeTimeOfDay(
@@ -130,6 +152,8 @@ async function readConfig() {
     "delayMinutes",
     "resetHours",
     "requireHoverTarget",
+    "guardMinutes",
+    "cooldownUntil",
     "dailyLockEnabled",
     "dailyLockStart",
     "dailyLockEnd"
@@ -140,6 +164,8 @@ async function readConfig() {
     delayMinutes: clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes),
     resetHours: clampResetHours(result.resetHours || DEFAULT_CONFIG.resetHours),
     requireHoverTarget: normalizeRequireHoverTarget(result.requireHoverTarget),
+    guardMinutes: clampGuardMinutes(result.guardMinutes || DEFAULT_CONFIG.guardMinutes),
+    cooldownUntil: normalizeCooldownUntil(result.cooldownUntil),
     dailyLockEnabled: result.dailyLockEnabled === true,
     dailyLockStart: dailyLockApi.normalizeTimeOfDay(
       result.dailyLockStart,
@@ -173,6 +199,18 @@ function clampResetHours(value) {
   if (isNaN(hours) || hours < 1) hours = 1;
   if (hours > 8760) hours = 8760;
   return hours;
+}
+
+function clampGuardMinutes(value) {
+  let minutes = parseInt(value, 10);
+  if (isNaN(minutes) || minutes < 1) minutes = 1;
+  if (minutes > 60) minutes = 60;
+  return minutes;
+}
+
+function normalizeCooldownUntil(value, now = Date.now()) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > now ? timestamp : null;
 }
 
 function normalizeRequireHoverTarget(value) {
@@ -306,6 +344,20 @@ async function scheduleDailyLockBoundaryAlarm() {
   });
 }
 
+async function scheduleCooldownBoundaryAlarm() {
+  if (!browser.alarms) return;
+
+  const config = await readConfig();
+  if (!config.cooldownUntil) {
+    await browser.alarms.clear(COOLDOWN_BOUNDARY_ALARM);
+    return;
+  }
+
+  await browser.alarms.create(COOLDOWN_BOUNDARY_ALARM, {
+    when: config.cooldownUntil
+  });
+}
+
 async function broadcastConfigRecheck() {
   let tabs = [];
 
@@ -326,6 +378,30 @@ async function reconcileDailyLockBoundary() {
   await scheduleDailyLockBoundaryAlarm();
   await broadcastConfigRecheck();
   await updateBadge();
+}
+
+async function reconcileCooldownBoundary() {
+  const config = await readConfig();
+  if (!config.cooldownUntil) {
+    const stored = await browser.storage.local.get("cooldownUntil");
+    if (stored.cooldownUntil !== null && stored.cooldownUntil !== undefined) {
+      await browser.storage.local.set({ cooldownUntil: null });
+    }
+  }
+
+  await reconcilePendingConfigChange();
+  await scheduleCooldownBoundaryAlarm();
+  await broadcastConfigRecheck();
+  await updateBadge();
+}
+
+async function startCooldown() {
+  const cooldownUntil = Date.now() + HOUR_MS;
+  await browser.storage.local.set({ cooldownUntil: cooldownUntil });
+  await scheduleCooldownBoundaryAlarm();
+  await broadcastConfigRecheck();
+  await updateBadge();
+  return { ok: true, cooldownUntil: cooldownUntil };
 }
 
 // --- Badge ---
@@ -385,6 +461,23 @@ function describePendingConfigChange(pending) {
     return "Disabling hover target";
   }
 
+  if (pending.type === "reduceGuardMinutes") {
+    const unit = pending.guardMinutes === 1 ? "minute" : "minutes";
+    return "Reducing settings hold to " + pending.guardMinutes + " " + unit;
+  }
+
+  if (pending.type === "endCooldown") {
+    return "Ending cooldown early";
+  }
+
+  if (pending.type === "disableDailyLock") {
+    return "Turning off daily lock";
+  }
+
+  if (pending.type === "changeDailyLockSchedule") {
+    return "Shortening daily lock";
+  }
+
   return "Updating settings";
 }
 
@@ -398,7 +491,7 @@ async function startPendingConfigChange(change) {
 
   const config = await readConfig();
   const startedAt = Date.now();
-  const waitMinutes = clampDelayMinutes(config.delayMinutes);
+  const waitMinutes = clampGuardMinutes(config.guardMinutes);
   const pendingBase = {
     id: String(startedAt),
     startedAt: startedAt,
@@ -443,6 +536,72 @@ async function startPendingConfigChange(change) {
       ...pendingBase,
       type: "disableHoverTarget",
       remainingMs: waitMinutes * MINUTE_MS
+    };
+  } else if (change.type === "reduceGuardMinutes") {
+    const guardMinutes = clampGuardMinutes(change.guardMinutes || DEFAULT_CONFIG.guardMinutes);
+
+    if (guardMinutes >= config.guardMinutes) {
+      await browser.storage.local.set({ guardMinutes: guardMinutes });
+      return { ok: true, applied: true, pending: null };
+    }
+
+    pending = {
+      ...pendingBase,
+      type: "reduceGuardMinutes",
+      remainingMs: waitMinutes * MINUTE_MS,
+      guardMinutes: guardMinutes
+    };
+  } else if (change.type === "endCooldown") {
+    if (!config.cooldownUntil) {
+      return { ok: true, applied: true, pending: null };
+    }
+
+    pending = {
+      ...pendingBase,
+      type: "endCooldown",
+      remainingMs: waitMinutes * MINUTE_MS,
+      cooldownUntil: config.cooldownUntil
+    };
+  } else if (change.type === "disableDailyLock") {
+    if (!config.dailyLockEnabled) {
+      return { ok: true, applied: true, pending: null };
+    }
+
+    pending = {
+      ...pendingBase,
+      type: "disableDailyLock",
+      remainingMs: waitMinutes * MINUTE_MS
+    };
+  } else if (change.type === "changeDailyLockSchedule") {
+    const dailyLockStart = dailyLockApi.normalizeTimeOfDay(change.dailyLockStart, null);
+    const dailyLockEnd = dailyLockApi.normalizeTimeOfDay(change.dailyLockEnd, null);
+    const currentDuration = dailyLockApi.getDurationMinutes(
+      config.dailyLockStart,
+      config.dailyLockEnd
+    );
+    const nextDuration = dailyLockApi.getDurationMinutes(dailyLockStart, dailyLockEnd);
+
+    if (!dailyLockStart || !dailyLockEnd || nextDuration === 0) {
+      return { ok: false, reason: "invalid-schedule", pending: null };
+    }
+
+    if (!config.dailyLockEnabled || nextDuration >= currentDuration) {
+      await browser.storage.local.set({
+        dailyLockStart: dailyLockStart,
+        dailyLockEnd: dailyLockEnd
+      });
+      return { ok: true, applied: true, pending: null };
+    }
+
+    pending = {
+      ...pendingBase,
+      type: "changeDailyLockSchedule",
+      remainingMs: waitMinutes * MINUTE_MS,
+      dailyLockStart: dailyLockStart,
+      dailyLockEnd: dailyLockEnd,
+      previousDailyLockStart: config.dailyLockStart,
+      previousDailyLockEnd: config.dailyLockEnd,
+      previousDurationMinutes: currentDuration
     };
   } else {
     return { ok: false, reason: "unknown-change", pending: null };
@@ -497,6 +656,16 @@ async function reconcilePendingConfigChange() {
     return null;
   }
 
+  if (pending.type === "endCooldown") {
+    const stored = await browser.storage.local.get("cooldownUntil");
+    const activeCooldownUntil = normalizeCooldownUntil(stored.cooldownUntil);
+    if (!activeCooldownUntil || activeCooldownUntil !== pending.cooldownUntil) {
+      await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
+      await schedulePendingConfigChange(null);
+      return null;
+    }
+  }
+
   if (typeof pending.remainingMs === "number") {
     const remainingMs = getPendingRemainingMs(pending);
     if (remainingMs > 0) {
@@ -542,7 +711,7 @@ function getPendingRemainingMs(pending) {
     return Math.max(0, pending.unlockAt - Date.now());
   }
 
-  const waitMinutes = clampDelayMinutes(pending.waitMinutes || DEFAULT_CONFIG.delayMinutes);
+  const waitMinutes = clampGuardMinutes(pending.waitMinutes || DEFAULT_CONFIG.guardMinutes);
   return waitMinutes * MINUTE_MS;
 }
 
@@ -559,11 +728,38 @@ async function applyPendingConfigChange(pending) {
     }
   } else if (pending.type === "disableHoverTarget") {
     await browser.storage.local.set({ requireHoverTarget: false });
+  } else if (pending.type === "reduceGuardMinutes") {
+    const guardMinutes = clampGuardMinutes(pending.guardMinutes || DEFAULT_CONFIG.guardMinutes);
+    if (guardMinutes < config.guardMinutes && config.guardMinutes <= pending.waitMinutes) {
+      await browser.storage.local.set({ guardMinutes: guardMinutes });
+    }
+  } else if (pending.type === "endCooldown") {
+    if (config.cooldownUntil && config.cooldownUntil === pending.cooldownUntil) {
+      await browser.storage.local.set({ cooldownUntil: null });
+    }
+  } else if (pending.type === "disableDailyLock") {
+    if (config.dailyLockEnabled) {
+      await browser.storage.local.set({ dailyLockEnabled: false });
+    }
+  } else if (pending.type === "changeDailyLockSchedule") {
+    if (
+      config.dailyLockEnabled &&
+      config.dailyLockStart === pending.previousDailyLockStart &&
+      config.dailyLockEnd === pending.previousDailyLockEnd
+    ) {
+      await browser.storage.local.set({
+        dailyLockStart: pending.dailyLockStart,
+        dailyLockEnd: pending.dailyLockEnd
+      });
+    }
   }
 
   await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
   await schedulePendingConfigChange(null);
   await scheduleSessionResetAlarm();
+  await scheduleDailyLockBoundaryAlarm();
+  await scheduleCooldownBoundaryAlarm();
+  await broadcastConfigRecheck();
   await updateBadge();
 }
 
@@ -597,7 +793,12 @@ async function reconcileExpiredSessions() {
     );
     await browser.storage.session.set({ [key]: nextSession });
 
-    if (dailyLockState.locked) {
+    if (config.cooldownUntil) {
+      await sendTabMessage(tabId, {
+        type: "SHOW_COOLDOWN",
+        unlockAt: config.cooldownUntil
+      });
+    } else if (dailyLockState.locked) {
       await sendTabMessage(tabId, {
         type: "SHOW_DAILY_LOCK",
         unlockAt: dailyLockState.unlockAt
@@ -630,6 +831,10 @@ if (browser.alarms) {
       reconcileDailyLockBoundary().catch((error) => {
         console.warn("[Airlock] Failed to apply daily lock boundary:", error);
       });
+    } else if (alarm.name === COOLDOWN_BOUNDARY_ALARM) {
+      reconcileCooldownBoundary().catch((error) => {
+        console.warn("[Airlock] Failed to apply cooldown boundary:", error);
+      });
     }
   });
 }
@@ -652,6 +857,12 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   ) {
     reconcileDailyLockBoundary().catch((error) => {
       console.warn("[Airlock] Failed to reconcile daily lock settings:", error);
+    });
+  }
+
+  if (changes.cooldownUntil || changes.sites) {
+    reconcileCooldownBoundary().catch((error) => {
+      console.warn("[Airlock] Failed to reconcile cooldown:", error);
     });
   }
 });
@@ -738,6 +949,11 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "START_COOLDOWN") {
+    startCooldown().then(sendResponse);
+    return true;
+  }
+
   if (!sender.tab) return;
   const tabId = sender.tab.id;
 
@@ -769,7 +985,24 @@ async function handleContentReady(tabId, domain) {
   const config = await getConfig();
   const active = await isTabActiveAndFocused(tabId);
 
-  if (!config.enabled || !isDomainTracked(domain, config.sites)) {
+  if (!isDomainTracked(domain, config.sites)) {
+    return {
+      type: "NO_OVERLAY",
+      active: active,
+      requireHoverTarget: config.requireHoverTarget
+    };
+  }
+
+  if (config.cooldownUntil) {
+    return {
+      type: "SHOW_COOLDOWN",
+      unlockAt: config.cooldownUntil,
+      active: active,
+      requireHoverTarget: config.requireHoverTarget
+    };
+  }
+
+  if (!config.enabled) {
     return {
       type: "NO_OVERLAY",
       active: active,
