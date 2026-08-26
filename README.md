@@ -45,9 +45,9 @@ For official Firefox uploads, package the authored source files directly instead
 
 ```sh
 mkdir -p store
-rm -f store/firefox-addon-1.0.6.zip
-zip -j store/firefox-addon-1.0.6.zip firefox/manifest.json
-zip -r store/firefox-addon-1.0.6.zip background content popup shared icons -x '*.DS_Store'
+rm -f store/firefox-addon-1.0.7.zip
+zip -j store/firefox-addon-1.0.7.zip firefox/manifest.json
+zip -r store/firefox-addon-1.0.7.zip background content popup shared icons -x '*.DS_Store'
 ```
 
 This keeps the submitted Firefox package free of generated extension files. The AMO generated-code question can be answered "No" when using this package.

@@ -1,6 +1,6 @@
 {
   "name": "airlock",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "private": true,
   "description": "Add intentional friction before accessing distracting websites.",
   "license": "GPL-3.0-only",
