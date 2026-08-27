@@ -17,7 +17,7 @@
     </header>
 
     <section class="delay-section">
-      <label for="delay-input">Wait</label>
+      <label for="delay-input" title="Controls both site-entry waits and the hold required to weaken restrictions">Hover wait</label>
       <div class="delay-input-group">
         <input type="number" id="delay-input" min="1" max="600" value="1">
         <span class="delay-unit">minutes</span>
@@ -29,22 +29,6 @@
       <div class="delay-input-group">
         <input type="number" id="reset-input" min="1" max="8760" value="24">
         <span class="delay-unit">hours</span>
-      </div>
-    </section>
-
-    <section class="delay-section">
-      <label for="hover-target-toggle">Hover target</label>
-      <label class="toggle">
-        <input type="checkbox" id="hover-target-toggle">
-        <span class="toggle-slider"></span>
-      </label>
-    </section>
-
-    <section class="delay-section">
-      <label for="guard-input" title="Hover time required for changes that weaken a restriction">Unlock hold</label>
-      <div class="delay-input-group">
-        <input type="number" id="guard-input" min="1" max="60" value="1">
-        <span class="delay-unit">minutes</span>
       </div>
     </section>
 
@@ -101,7 +85,7 @@
 
     <section class="sites-section">
       <h2>Tracked Sites</h2>
-      <p class="sites-help">Add an optional limit in minutes per day</p>
+      <p class="sites-help">Set a daily limit, then choose a hard block or cooldown</p>
       <button id="add-current-btn" class="add-current-btn" style="display: none"></button>
       <ul id="site-list" class="site-list"></ul>
       <form id="add-site-form" class="add-site-form">
@@ -110,6 +94,18 @@
       </form>
     </section>
   </div>
+
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title">
+    <form method="dialog">
+      <h2 id="confirm-dialog-title">Confirm change</h2>
+      <p id="confirm-dialog-message"></p>
+      <div class="confirm-dialog-actions">
+        <button type="submit" value="cancel" class="confirm-dialog-cancel">Cancel</button>
+        <button type="submit" value="confirm" id="confirm-dialog-submit" class="confirm-dialog-submit">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="../shared/daily-lock.js"></script>
   <script src="popup.js"></script>
 </body>

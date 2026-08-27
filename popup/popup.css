@@ -18,6 +18,77 @@ body {
   gap: 16px;
 }
 
+/* In-popup confirmation */
+.confirm-dialog {
+  width: min(300px, calc(100% - 32px));
+  margin: auto;
+  padding: 0;
+  color: #1a1a2e;
+  background: white;
+  border: 1px solid #dfe3ec;
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.28);
+}
+
+.confirm-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.confirm-dialog form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+}
+
+.confirm-dialog h2 {
+  color: #1a1a2e;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.confirm-dialog p {
+  color: #667085;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.confirm-dialog-actions button {
+  padding: 7px 11px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.confirm-dialog-cancel {
+  color: #667085;
+  background: white;
+  border: 1px solid #d0d5dd;
+}
+
+.confirm-dialog-submit {
+  color: white;
+  background: #5b8def;
+  border: 1px solid #5b8def;
+}
+
+.confirm-dialog-cancel:hover {
+  background: #f8f9fc;
+}
+
+.confirm-dialog-submit:hover {
+  background: #4a7de0;
+  border-color: #4a7de0;
+}
+
 /* Header */
 .header {
   display: flex;
@@ -395,7 +466,7 @@ body {
 
 .site-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
   padding: 8px 10px;
@@ -438,8 +509,15 @@ body {
 .site-actions {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 4px;
+}
+
+.site-settings {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .site-limit-group {
@@ -463,6 +541,41 @@ body {
 }
 
 .site-limit-input:focus {
+  border-color: #5b8def;
+}
+
+.site-limit-policy {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  color: #999;
+  font-size: 10px;
+}
+
+.site-limit-policy select,
+.site-limit-policy input {
+  min-width: 0;
+  padding: 3px 4px;
+  color: #555;
+  background: #fbfcff;
+  border: 1px solid #ddd;
+  border-radius: 5px;
+  font-size: 10px;
+  outline: none;
+}
+
+.site-limit-policy select {
+  width: 112px;
+}
+
+.site-limit-policy input {
+  width: 42px;
+  text-align: center;
+}
+
+.site-limit-policy select:focus,
+.site-limit-policy input:focus {
   border-color: #5b8def;
 }
 

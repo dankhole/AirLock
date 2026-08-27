@@ -155,10 +155,10 @@ function baseConfig(overrides = {}) {
     sites: ["example.com"],
     delayMinutes: 1,
     resetHours: 24,
-    requireHoverTarget: false,
     dailyLimits: {},
+    dailyLimitPolicies: {},
+    dailyLimitCooldowns: {},
     dailyUsage: { date: localDateKey(), sites: {} },
-    guardMinutes: 1,
     cooldownUntil: null,
     dailyLockEnabled: false,
     dailyLockStart: "22:00",
@@ -266,6 +266,108 @@ test("daily usage from a previous local day does not block the site", async () =
   assert.equal(response.dailyUsageRemainingMs, 60 * 1000);
 });
 
+test("a per-site cooldown starts at the limit and resets usage when it expires", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({
+      dailyLimits: { "example.com": 1 },
+      dailyLimitPolicies: {
+        "example.com": { mode: "cooldown", cooldownMinutes: 5 }
+      },
+      dailyUsage: {
+        date: localDateKey(),
+        sites: { "example.com": 59 * 1000 }
+      }
+    })
+  );
+
+  const before = Date.now();
+  const usageResponse = await context.handleDailyUsageUpdate(7, "example.com", 1000);
+  const cooldownUntil = state.localData.dailyLimitCooldowns["example.com"];
+
+  assert.equal(usageResponse.reached, true);
+  assert.equal(usageResponse.dailyLimitMode, "cooldown");
+  assert.equal(usageResponse.resetAt, cooldownUntil);
+  assert.ok(cooldownUntil >= before + 5 * 60 * 1000);
+
+  const blockedResponse = await context.handleContentReady(7, "example.com");
+  assert.equal(blockedResponse.type, "SHOW_DAILY_LIMIT");
+  assert.equal(blockedResponse.dailyLimitMode, "cooldown");
+  assert.equal(blockedResponse.resetAt, cooldownUntil);
+
+  const config = await context.readConfig();
+  const expiredState = await context.getDailyLimitState(
+    config,
+    "example.com",
+    cooldownUntil + 1
+  );
+  assert.equal(expiredState.reached, false);
+  assert.equal(expiredState.remainingMs, 60 * 1000);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], undefined);
+  assert.equal(state.localData.dailyLimitCooldowns["example.com"], undefined);
+});
+
+test("switching from a hard block to cooldown requires the hover wait", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({
+      delayMinutes: 2,
+      dailyLimits: { "example.com": 30 }
+    })
+  );
+
+  const response = await context.startPendingConfigChange({
+    type: "changeDailyLimitPolicy",
+    site: "example.com",
+    dailyLimitPolicy: { mode: "cooldown", cooldownMinutes: 60 }
+  });
+
+  assert.equal(response.applied, false);
+  assert.equal(response.pending.remainingMs, 2 * 60 * 1000);
+  assert.equal(state.localData.dailyLimitPolicies["example.com"], undefined);
+});
+
+test("making a per-site cooldown longer applies immediately", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({
+      dailyLimits: { "example.com": 30 },
+      dailyLimitPolicies: {
+        "example.com": { mode: "cooldown", cooldownMinutes: 30 }
+      }
+    })
+  );
+
+  const response = await context.startPendingConfigChange({
+    type: "changeDailyLimitPolicy",
+    site: "example.com",
+    dailyLimitPolicy: { mode: "cooldown", cooldownMinutes: 60 }
+  });
+
+  assert.equal(response.applied, true);
+  assert.equal(state.localData.dailyLimitPolicies["example.com"].cooldownMinutes, 60);
+  assert.equal(state.localData.pendingConfigChange, undefined);
+});
+
+test("shortening a per-site cooldown requires the hover wait", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({
+      delayMinutes: 2,
+      dailyLimits: { "example.com": 30 },
+      dailyLimitPolicies: {
+        "example.com": { mode: "cooldown", cooldownMinutes: 60 }
+      }
+    })
+  );
+
+  const response = await context.startPendingConfigChange({
+    type: "changeDailyLimitPolicy",
+    site: "example.com",
+    dailyLimitPolicy: { mode: "cooldown", cooldownMinutes: 15 }
+  });
+
+  assert.equal(response.applied, false);
+  assert.equal(response.pending.remainingMs, 2 * 60 * 1000);
+  assert.equal(state.localData.dailyLimitPolicies["example.com"].cooldownMinutes, 60);
+});
+
 test("raising a daily limit uses the guarded settings countdown", async () => {
   const { context, state } = await loadBackground(
     baseConfig({ dailyLimits: { "example.com": 30 } })
@@ -315,7 +417,7 @@ test("ending a cooldown early requires the full settings hold", async () => {
   assert.equal(state.localData.pendingConfigChange, undefined);
 });
 
-test("shortening a daily lock is guarded while lengthening it applies immediately", async () => {
+test("changing an enabled daily lock schedule is guarded", async () => {
   const { context, state } = await loadBackground(
     baseConfig({
       dailyLockEnabled: true,
@@ -340,7 +442,34 @@ test("shortening a daily lock is guarded while lengthening it applies immediatel
     dailyLockStart: "21:00",
     dailyLockEnd: "07:00"
   });
-  assert.equal(longer.applied, true);
-  assert.equal(state.localData.dailyLockStart, "21:00");
-  assert.equal(state.localData.pendingConfigChange, undefined);
+  assert.equal(longer.applied, false);
+  assert.equal(state.localData.dailyLockStart, "23:00");
+});
+
+test("the site wait is also the hold duration for weaker settings", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({ delayMinutes: 3, resetHours: 24 })
+  );
+
+  const disable = await context.startPendingConfigChange({ type: "disableAirlock" });
+  assert.equal(disable.pending.remainingMs, 3 * 60 * 1000);
+  assert.equal(state.localData.enabled, true);
+
+  await context.cancelPendingConfigChange();
+  const reset = await context.startPendingConfigChange({
+    type: "increaseResetHours",
+    resetHours: 48
+  });
+  assert.equal(reset.pending.remainingMs, 3 * 60 * 1000);
+  assert.equal(state.localData.resetHours, 24);
+});
+
+test("legacy wait and unlock hold settings migrate to one stricter wait", async () => {
+  const { state } = await loadBackground(
+    baseConfig({ delayMinutes: 2, guardMinutes: 5, requireHoverTarget: false })
+  );
+
+  assert.equal(state.localData.delayMinutes, 5);
+  assert.equal(state.localData.guardMinutes, undefined);
+  assert.equal(state.localData.requireHoverTarget, undefined);
 });

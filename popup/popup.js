@@ -4,8 +4,6 @@ const dailyLockApi = globalThis.AirlockDailyLock;
 const enabledToggle = document.getElementById("enabled-toggle");
 const delayInput = document.getElementById("delay-input");
 const resetInput = document.getElementById("reset-input");
-const hoverTargetToggle = document.getElementById("hover-target-toggle");
-const guardInput = document.getElementById("guard-input");
 const cooldownSection = document.querySelector(".cooldown-section");
 const cooldownStatus = document.getElementById("cooldown-status");
 const cooldownBtn = document.getElementById("cooldown-btn");
@@ -23,16 +21,25 @@ const pendingConfigTitle = document.getElementById("pending-config-title");
 const pendingConfigTimer = document.getElementById("pending-config-timer");
 const pendingConfigHoverTarget = document.getElementById("pending-config-hover-target");
 const pendingConfigCancel = document.getElementById("pending-config-cancel");
+const confirmDialog = document.getElementById("confirm-dialog");
+const confirmDialogTitle = document.getElementById("confirm-dialog-title");
+const confirmDialogMessage = document.getElementById("confirm-dialog-message");
+const confirmDialogSubmit = document.getElementById("confirm-dialog-submit");
 const PENDING_CONFIG_TICK_MS = 250;
 const PENDING_CONFIG_SYNC_MS = 1000;
+const DEFAULT_DAILY_LIMIT_COOLDOWN_MINUTES = 60;
+
+confirmDialog.addEventListener("click", (event) => {
+  if (event.target === confirmDialog) confirmDialog.close("cancel");
+});
 
 let sites = [];
 let delayMinutes = 1;
 let resetHours = 24;
-let requireHoverTarget = false;
 let dailyLimits = {};
+let dailyLimitPolicies = {};
+let dailyLimitCooldowns = {};
 let dailyUsage = { date: "", sites: {} };
-let guardMinutes = 1;
 let cooldownUntil = null;
 let dailyLockEnabled = false;
 let dailyLockStart = dailyLockApi.DEFAULT_START;
@@ -54,10 +61,10 @@ browser.storage.local.get([
   "sites",
   "delayMinutes",
   "resetHours",
-  "requireHoverTarget",
   "dailyLimits",
+  "dailyLimitPolicies",
+  "dailyLimitCooldowns",
   "dailyUsage",
-  "guardMinutes",
   "cooldownUntil",
   "dailyLockEnabled",
   "dailyLockStart",
@@ -67,10 +74,10 @@ browser.storage.local.get([
 
   delayMinutes = normalizeDelayMinutes(result.delayMinutes || 1);
   resetHours = normalizeResetHours(result.resetHours || 24);
-  requireHoverTarget = result.requireHoverTarget === true;
   dailyLimits = normalizeDailyLimits(result.dailyLimits);
+  dailyLimitPolicies = normalizeDailyLimitPolicies(result.dailyLimitPolicies);
+  dailyLimitCooldowns = normalizeDailyLimitCooldowns(result.dailyLimitCooldowns);
   dailyUsage = normalizeDailyUsage(result.dailyUsage);
-  guardMinutes = normalizeGuardMinutes(result.guardMinutes || 1);
   cooldownUntil = normalizeCooldownUntil(result.cooldownUntil);
   dailyLockStart = dailyLockApi.normalizeTimeOfDay(
     result.dailyLockStart,
@@ -83,8 +90,6 @@ browser.storage.local.get([
   dailyLockEnabled = result.dailyLockEnabled === true && dailyLockStart !== dailyLockEnd;
   delayInput.value = delayMinutes;
   resetInput.value = resetHours;
-  hoverTargetToggle.checked = requireHoverTarget;
-  guardInput.value = guardMinutes;
   dailyLockToggle.checked = dailyLockEnabled;
   dailyLockStartInput.value = dailyLockStart;
   dailyLockEndInput.value = dailyLockEnd;
@@ -123,12 +128,18 @@ enabledToggle.addEventListener("change", () => {
     return;
   }
 
+  if (!enabledToggle.checked) {
+    enabledToggle.checked = true;
+    startPendingConfigChange({ type: "disableAirlock" });
+    return;
+  }
+
   browser.storage.local.set({ enabled: enabledToggle.checked });
 });
 
 // --- Delay ---
 
-delayInput.addEventListener("change", () => {
+delayInput.addEventListener("change", async () => {
   const val = normalizeDelayMinutes(delayInput.value);
 
   if (pendingConfigChange) {
@@ -136,7 +147,7 @@ delayInput.addEventListener("change", () => {
     return;
   }
 
-  if (val > delayMinutes && !confirmSettingIncrease("wait", delayMinutes, val, "minute")) {
+  if (val > delayMinutes && !(await confirmSettingIncrease("hover wait", delayMinutes, val, "minute"))) {
     delayInput.value = delayMinutes;
     return;
   }
@@ -163,8 +174,12 @@ resetInput.addEventListener("change", () => {
     return;
   }
 
-  if (val > resetHours && !confirmSettingIncrease("reset window", resetHours, val, "hour")) {
+  if (val > resetHours) {
     resetInput.value = resetHours;
+    startPendingConfigChange({
+      type: "increaseResetHours",
+      resetHours: val
+    });
     return;
   }
 
@@ -173,64 +188,9 @@ resetInput.addEventListener("change", () => {
   browser.storage.local.set({ resetHours: resetHours });
 });
 
-guardInput.addEventListener("change", () => {
-  const val = normalizeGuardMinutes(guardInput.value);
-
-  if (pendingConfigChange) {
-    guardInput.value = guardMinutes;
-    return;
-  }
-
-  if (val > guardMinutes && !confirmSettingIncrease("unlock hold", guardMinutes, val, "minute")) {
-    guardInput.value = guardMinutes;
-    return;
-  }
-
-  if (val >= guardMinutes) {
-    guardMinutes = val;
-    guardInput.value = guardMinutes;
-    browser.storage.local.set({ guardMinutes: guardMinutes });
-    return;
-  }
-
-  guardInput.value = guardMinutes;
-  startPendingConfigChange({
-    type: "reduceGuardMinutes",
-    guardMinutes: val
-  });
-});
-
-// --- Hover Target ---
-
-hoverTargetToggle.addEventListener("change", () => {
-  const nextRequireHoverTarget = hoverTargetToggle.checked === true;
-
-  if (pendingConfigChange) {
-    hoverTargetToggle.checked = requireHoverTarget;
-    return;
-  }
-
-  if (nextRequireHoverTarget) {
-    if (!window.confirm("Turn on hover target? The timer will only count down while the pointer is on the overlay target.")) {
-      hoverTargetToggle.checked = requireHoverTarget;
-      return;
-    }
-
-    requireHoverTarget = true;
-    hoverTargetToggle.checked = true;
-    browser.storage.local.set({ requireHoverTarget: true });
-    return;
-  }
-
-  hoverTargetToggle.checked = requireHoverTarget;
-  startPendingConfigChange({
-    type: "disableHoverTarget"
-  });
-});
-
 // --- Cooldown ---
 
-cooldownBtn.addEventListener("click", () => {
+cooldownBtn.addEventListener("click", async () => {
   if (pendingConfigChange) return;
 
   if (isCooldownActive()) {
@@ -242,7 +202,11 @@ cooldownBtn.addEventListener("click", () => {
   }
 
   if (sites.length === 0) return;
-  if (!window.confirm("Start a one-hour cooldown? All tracked sites will stay blocked until it ends.")) {
+  if (!(await confirmInPopup({
+    title: "Start cooldown?",
+    message: "All tracked sites will stay blocked for one hour.",
+    confirmLabel: "Start cooldown"
+  }))) {
     return;
   }
 
@@ -254,7 +218,7 @@ cooldownBtn.addEventListener("click", () => {
 
 // --- Daily Lock ---
 
-dailyLockToggle.addEventListener("change", () => {
+dailyLockToggle.addEventListener("change", async () => {
   if (pendingConfigChange) {
     dailyLockToggle.checked = dailyLockEnabled;
     return;
@@ -275,13 +239,15 @@ dailyLockToggle.addEventListener("change", () => {
 
   if (
     nextEnabled &&
-    !window.confirm(
-      "Turn on the daily lock from " +
+    !(await confirmInPopup({
+      title: "Turn on daily lock?",
+      message: "Tracked sites will be blocked from " +
         formatTimeOfDayLabel(schedule.start) +
         " to " +
         formatTimeOfDayLabel(schedule.end) +
-        "? Tracked sites cannot be opened during this window."
-    )
+        ".",
+      confirmLabel: "Turn on"
+    }))
   ) {
     dailyLockToggle.checked = dailyLockEnabled;
     return;
@@ -311,10 +277,10 @@ function saveDailyLockTimes() {
   const schedule = validateDailyLockInputs();
   if (!schedule) return;
 
-  const currentDuration = dailyLockApi.getDurationMinutes(dailyLockStart, dailyLockEnd);
-  const nextDuration = dailyLockApi.getDurationMinutes(schedule.start, schedule.end);
-
-  if (dailyLockEnabled && nextDuration < currentDuration) {
+  if (
+    dailyLockEnabled &&
+    (schedule.start !== dailyLockStart || schedule.end !== dailyLockEnd)
+  ) {
     dailyLockStartInput.value = dailyLockStart;
     dailyLockEndInput.value = dailyLockEnd;
     startPendingConfigChange({
@@ -468,6 +434,9 @@ function renderSites() {
     const actions = document.createElement("div");
     actions.className = "site-actions";
 
+    const settings = document.createElement("div");
+    settings.className = "site-settings";
+
     const limitGroup = document.createElement("label");
     limitGroup.className = "site-limit-group";
     limitGroup.title = "Daily time limit in minutes; leave blank for no limit";
@@ -488,6 +457,51 @@ function renderSites() {
 
     limitGroup.appendChild(limitInput);
     limitGroup.appendChild(limitUnit);
+    settings.appendChild(limitGroup);
+
+    const limit = dailyLimits[site] || null;
+    if (limit !== null) {
+      const policy = normalizeDailyLimitPolicy(dailyLimitPolicies[site]);
+      const policyGroup = document.createElement("div");
+      policyGroup.className = "site-limit-policy";
+
+      const policySelect = document.createElement("select");
+      policySelect.setAttribute("aria-label", "Action when " + site + " reaches its daily limit");
+      policySelect.disabled = Boolean(pendingConfigChange);
+      policySelect.innerHTML = '<option value="block">Block until tomorrow</option><option value="cooldown">Cooldown</option>';
+      policySelect.value = policy.mode;
+
+      const cooldownInput = document.createElement("input");
+      cooldownInput.type = "number";
+      cooldownInput.min = "1";
+      cooldownInput.max = "1440";
+      cooldownInput.value = policy.cooldownMinutes;
+      cooldownInput.setAttribute("aria-label", "Cooldown for " + site + " in minutes");
+      cooldownInput.disabled = Boolean(pendingConfigChange) || policy.mode !== "cooldown";
+      cooldownInput.hidden = policy.mode !== "cooldown";
+
+      const cooldownUnit = document.createElement("span");
+      cooldownUnit.textContent = "min";
+      cooldownUnit.hidden = policy.mode !== "cooldown";
+
+      policySelect.addEventListener("change", () => {
+        changeDailyLimitPolicy(site, {
+          mode: policySelect.value,
+          cooldownMinutes: cooldownInput.value
+        });
+      });
+      cooldownInput.addEventListener("change", () => {
+        changeDailyLimitPolicy(site, {
+          mode: "cooldown",
+          cooldownMinutes: cooldownInput.value
+        });
+      });
+
+      policyGroup.appendChild(policySelect);
+      policyGroup.appendChild(cooldownInput);
+      policyGroup.appendChild(cooldownUnit);
+      settings.appendChild(policyGroup);
+    }
 
     const btn = document.createElement("button");
     btn.className = "site-remove";
@@ -511,7 +525,7 @@ function renderSites() {
       }
     });
 
-    actions.appendChild(limitGroup);
+    actions.appendChild(settings);
     actions.appendChild(btn);
     li.appendChild(info);
     li.appendChild(actions);
@@ -522,6 +536,20 @@ function renderSites() {
 
   renderAddCurrentButton();
   renderCooldown();
+}
+
+function changeDailyLimitPolicy(site, nextValue) {
+  if (pendingConfigChange) return;
+
+  const currentPolicy = normalizeDailyLimitPolicy(dailyLimitPolicies[site]);
+  const nextPolicy = normalizeDailyLimitPolicy(nextValue);
+  if (JSON.stringify(currentPolicy) === JSON.stringify(nextPolicy)) return;
+
+  startPendingConfigChange({
+    type: "changeDailyLimitPolicy",
+    site: site,
+    dailyLimitPolicy: nextPolicy
+  });
 }
 
 function changeDailyLimit(site, input) {
@@ -563,6 +591,11 @@ function changeDailyLimit(site, input) {
 function formatSiteUsage(site) {
   const limit = dailyLimits[site];
   if (!limit) return "No daily limit";
+
+  const cooldownUntil = Number(dailyLimitCooldowns[site]);
+  if (Number.isFinite(cooldownUntil) && cooldownUntil > Date.now()) {
+    return "Cooldown · " + formatTime(cooldownUntil - Date.now()) + " left";
+  }
 
   const usedMinutes = Math.min(limit, Math.floor(getTodayUsageMs(site) / 60000));
   return usedMinutes + " of " + limit + " min used today";
@@ -671,16 +704,6 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     resetInput.value = resetHours;
   }
 
-  if (changes.requireHoverTarget) {
-    requireHoverTarget = changes.requireHoverTarget.newValue === true;
-    hoverTargetToggle.checked = requireHoverTarget;
-  }
-
-  if (changes.guardMinutes) {
-    guardMinutes = normalizeGuardMinutes(changes.guardMinutes.newValue || 1);
-    guardInput.value = guardMinutes;
-  }
-
   if (changes.cooldownUntil) {
     cooldownUntil = normalizeCooldownUntil(changes.cooldownUntil.newValue);
     renderCooldown();
@@ -720,6 +743,16 @@ browser.storage.onChanged.addListener((changes, areaName) => {
 
   if (changes.dailyLimits) {
     dailyLimits = normalizeDailyLimits(changes.dailyLimits.newValue);
+    renderSites();
+  }
+
+  if (changes.dailyLimitPolicies) {
+    dailyLimitPolicies = normalizeDailyLimitPolicies(changes.dailyLimitPolicies.newValue);
+    renderSites();
+  }
+
+  if (changes.dailyLimitCooldowns) {
+    dailyLimitCooldowns = normalizeDailyLimitCooldowns(changes.dailyLimitCooldowns.newValue);
     renderSites();
   }
 
@@ -775,6 +808,42 @@ function normalizeDailyLimits(value) {
   );
 }
 
+function normalizeDailyLimitCooldownMinutes(value) {
+  let minutes = parseInt(value, 10);
+  if (isNaN(minutes) || minutes < 1) minutes = DEFAULT_DAILY_LIMIT_COOLDOWN_MINUTES;
+  if (minutes > 1440) minutes = 1440;
+  return minutes;
+}
+
+function normalizeDailyLimitPolicy(value) {
+  if (!value || value.mode !== "cooldown") {
+    return { mode: "block", cooldownMinutes: DEFAULT_DAILY_LIMIT_COOLDOWN_MINUTES };
+  }
+
+  return {
+    mode: "cooldown",
+    cooldownMinutes: normalizeDailyLimitCooldownMinutes(value.cooldownMinutes)
+  };
+}
+
+function normalizeDailyLimitPolicies(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, policy]) => policy && policy.mode === "cooldown")
+      .map(([site, policy]) => [site, normalizeDailyLimitPolicy(policy)])
+  );
+}
+
+function normalizeDailyLimitCooldowns(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([site, until]) => [site, Number(until)])
+      .filter(([, until]) => Number.isFinite(until) && until > Date.now())
+  );
+}
+
 function getLocalDateKey(now = Date.now()) {
   const date = new Date(now);
   return [
@@ -801,20 +870,13 @@ function getTodayUsageMs(site) {
   return Math.max(0, Number(dailyUsage.sites[site]) || 0);
 }
 
-function normalizeGuardMinutes(value) {
-  let minutes = parseInt(value, 10);
-  if (isNaN(minutes) || minutes < 1) minutes = 1;
-  if (minutes > 60) minutes = 60;
-  return minutes;
-}
-
 function confirmSettingIncrease(label, currentValue, nextValue, unit) {
   const currentUnit = currentValue === 1 ? unit : unit + "s";
   const nextUnit = nextValue === 1 ? unit : unit + "s";
-  return window.confirm(
-    "Increase " +
-      label +
-      " from " +
+  return confirmInPopup({
+    title: "Increase " + label + "?",
+    message:
+      "Change from " +
       currentValue +
       " " +
       currentUnit +
@@ -822,8 +884,27 @@ function confirmSettingIncrease(label, currentValue, nextValue, unit) {
       nextValue +
       " " +
       nextUnit +
-      "?"
-  );
+      ".",
+    confirmLabel: "Increase"
+  });
+}
+
+function confirmInPopup({ title, message, confirmLabel = "Confirm" }) {
+  if (confirmDialog.open) confirmDialog.close("cancel");
+
+  confirmDialogTitle.textContent = title;
+  confirmDialogMessage.textContent = message;
+  confirmDialogSubmit.textContent = confirmLabel;
+  confirmDialog.returnValue = "cancel";
+
+  return new Promise((resolve) => {
+    confirmDialog.addEventListener(
+      "close",
+      () => resolve(confirmDialog.returnValue === "confirm"),
+      { once: true }
+    );
+    confirmDialog.showModal();
+  });
 }
 
 function formatTime(ms) {
@@ -837,8 +918,6 @@ function setControlsLocked(locked) {
   enabledToggle.disabled = locked;
   delayInput.disabled = locked;
   resetInput.disabled = locked;
-  hoverTargetToggle.disabled = locked;
-  guardInput.disabled = locked;
   cooldownBtn.disabled = locked || (!isCooldownActive() && sites.length === 0);
   dailyLockToggle.disabled = locked;
   dailyLockStartInput.disabled = locked;
@@ -852,6 +931,9 @@ function setControlsLocked(locked) {
   });
   siteList.querySelectorAll("input").forEach((input) => {
     input.disabled = locked;
+  });
+  siteList.querySelectorAll("select").forEach((select) => {
+    select.disabled = locked;
   });
 }
 
@@ -886,13 +968,18 @@ function getPendingConfigTitle(pending) {
     return "Removing " + pending.site;
   }
 
+  if (pending.type === "disableAirlock") {
+    return "Turning off Airlock";
+  }
+
   if (pending.type === "reduceDelay") {
     const unit = pending.delayMinutes === 1 ? "minute" : "minutes";
     return "Reducing wait to " + pending.delayMinutes + " " + unit;
   }
 
-  if (pending.type === "disableHoverTarget") {
-    return "Disabling hover target";
+  if (pending.type === "increaseResetHours") {
+    const unit = pending.resetHours === 1 ? "hour" : "hours";
+    return "Increasing reset window to " + pending.resetHours + " " + unit;
   }
 
   if (pending.type === "changeDailyLimit") {
@@ -901,9 +988,10 @@ function getPendingConfigTitle(pending) {
       : "Increasing daily limit for " + pending.site;
   }
 
-  if (pending.type === "reduceGuardMinutes") {
-    const unit = pending.guardMinutes === 1 ? "minute" : "minutes";
-    return "Reducing settings hold to " + pending.guardMinutes + " " + unit;
+  if (pending.type === "changeDailyLimitPolicy") {
+    return pending.previousDailyLimitPolicy.mode === "block"
+      ? "Changing limit to cooldown for " + pending.site
+      : "Reducing cooldown for " + pending.site;
   }
 
   if (pending.type === "endCooldown") {
@@ -915,7 +1003,7 @@ function getPendingConfigTitle(pending) {
   }
 
   if (pending.type === "changeDailyLockSchedule") {
-    return "Shortening daily lock";
+    return "Changing daily lock schedule";
   }
 
   return "Updating settings";
@@ -1114,4 +1202,5 @@ window.addEventListener("pagehide", flushPendingConfigChange);
 setInterval(() => {
   renderDailyLockStatus();
   renderCooldown();
+  updateSiteUsageLabels();
 }, 1000);

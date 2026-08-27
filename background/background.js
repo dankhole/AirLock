@@ -7,9 +7,8 @@ const DEFAULT_CONFIG = {
   sites: [],
   delayMinutes: 1,
   resetHours: 24,
-  requireHoverTarget: false,
   dailyLimits: {},
-  guardMinutes: 1,
+  dailyLimitPolicies: {},
   cooldownUntil: null,
   dailyLockEnabled: false,
   dailyLockStart: dailyLockApi.DEFAULT_START,
@@ -24,6 +23,8 @@ const COOLDOWN_BOUNDARY_ALARM = "airlock.cooldownBoundary";
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const MAX_DAILY_LIMIT_MINUTES = 24 * 60;
+const DEFAULT_DAILY_LIMIT_COOLDOWN_MINUTES = 60;
+const MAX_DAILY_LIMIT_COOLDOWN_MINUTES = 24 * 60;
 const MAX_USAGE_UPDATE_MS = 5 * 1000;
 
 // --- Initialization ---
@@ -70,6 +71,8 @@ async function migrateStoredConfig() {
     "resetHours",
     "requireHoverTarget",
     "dailyLimits",
+    "dailyLimitPolicies",
+    "dailyLimitCooldowns",
     "dailyUsage",
     "guardMinutes",
     "cooldownUntil",
@@ -82,12 +85,12 @@ async function migrateStoredConfig() {
   if (existing.enabled === undefined) updates.enabled = DEFAULT_CONFIG.enabled;
   if (existing.sites === undefined) updates.sites = DEFAULT_CONFIG.sites;
 
-  if (existing.delayMinutes === undefined) {
-    updates.delayMinutes = DEFAULT_CONFIG.delayMinutes;
-  } else {
-    const delayMinutes = clampDelayMinutes(existing.delayMinutes);
-    if (delayMinutes !== existing.delayMinutes) updates.delayMinutes = delayMinutes;
-  }
+  const delayMinutes = clampDelayMinutes(existing.delayMinutes || DEFAULT_CONFIG.delayMinutes);
+  const legacyGuardMinutes = existing.guardMinutes === undefined
+    ? delayMinutes
+    : clampDelayMinutes(existing.guardMinutes);
+  const unifiedWaitMinutes = Math.max(delayMinutes, legacyGuardMinutes);
+  if (existing.delayMinutes !== unifiedWaitMinutes) updates.delayMinutes = unifiedWaitMinutes;
 
   if (existing.resetHours === undefined) {
     updates.resetHours = DEFAULT_CONFIG.resetHours;
@@ -96,32 +99,29 @@ async function migrateStoredConfig() {
     if (resetHours !== existing.resetHours) updates.resetHours = resetHours;
   }
 
-  if (existing.requireHoverTarget === undefined) {
-    updates.requireHoverTarget = DEFAULT_CONFIG.requireHoverTarget;
-  } else {
-    const requireHoverTarget = normalizeRequireHoverTarget(existing.requireHoverTarget);
-    if (requireHoverTarget !== existing.requireHoverTarget) {
-      updates.requireHoverTarget = requireHoverTarget;
-    }
-  }
-
   const dailyLimits = normalizeDailyLimits(existing.dailyLimits, existing.sites || []);
   if (JSON.stringify(existing.dailyLimits || {}) !== JSON.stringify(dailyLimits)) {
     updates.dailyLimits = dailyLimits;
   }
 
-  if (!existing.dailyUsage || typeof existing.dailyUsage !== "object") {
-    updates.dailyUsage = createEmptyDailyUsage();
+  const dailyLimitPolicies = normalizeDailyLimitPolicies(
+    existing.dailyLimitPolicies,
+    existing.sites || []
+  );
+  if (JSON.stringify(existing.dailyLimitPolicies || {}) !== JSON.stringify(dailyLimitPolicies)) {
+    updates.dailyLimitPolicies = dailyLimitPolicies;
   }
 
-  if (existing.guardMinutes === undefined) {
-    // Preserve the old guarded-change duration on upgrade, then let it vary independently.
-    updates.guardMinutes = clampGuardMinutes(
-      existing.delayMinutes || DEFAULT_CONFIG.guardMinutes
-    );
-  } else {
-    const guardMinutes = clampGuardMinutes(existing.guardMinutes);
-    if (guardMinutes !== existing.guardMinutes) updates.guardMinutes = guardMinutes;
+  const dailyLimitCooldowns = normalizeDailyLimitCooldowns(
+    existing.dailyLimitCooldowns,
+    existing.sites || []
+  );
+  if (JSON.stringify(existing.dailyLimitCooldowns || {}) !== JSON.stringify(dailyLimitCooldowns)) {
+    updates.dailyLimitCooldowns = dailyLimitCooldowns;
+  }
+
+  if (!existing.dailyUsage || typeof existing.dailyUsage !== "object") {
+    updates.dailyUsage = createEmptyDailyUsage();
   }
 
   const cooldownUntil = normalizeCooldownUntil(existing.cooldownUntil);
@@ -157,6 +157,9 @@ async function migrateStoredConfig() {
   if (existing.delaySeconds !== undefined) {
     await browser.storage.local.remove("delaySeconds");
   }
+  if (existing.requireHoverTarget !== undefined || existing.guardMinutes !== undefined) {
+    await browser.storage.local.remove(["requireHoverTarget", "guardMinutes"]);
+  }
 }
 
 async function readConfig() {
@@ -165,9 +168,8 @@ async function readConfig() {
     "sites",
     "delayMinutes",
     "resetHours",
-    "requireHoverTarget",
     "dailyLimits",
-    "guardMinutes",
+    "dailyLimitPolicies",
     "cooldownUntil",
     "dailyLockEnabled",
     "dailyLockStart",
@@ -178,9 +180,11 @@ async function readConfig() {
     sites: result.sites || [],
     delayMinutes: clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes),
     resetHours: clampResetHours(result.resetHours || DEFAULT_CONFIG.resetHours),
-    requireHoverTarget: normalizeRequireHoverTarget(result.requireHoverTarget),
     dailyLimits: normalizeDailyLimits(result.dailyLimits, result.sites || []),
-    guardMinutes: clampGuardMinutes(result.guardMinutes || DEFAULT_CONFIG.guardMinutes),
+    dailyLimitPolicies: normalizeDailyLimitPolicies(
+      result.dailyLimitPolicies,
+      result.sites || []
+    ),
     cooldownUntil: normalizeCooldownUntil(result.cooldownUntil),
     dailyLockEnabled: result.dailyLockEnabled === true,
     dailyLockStart: dailyLockApi.normalizeTimeOfDay(
@@ -223,26 +227,88 @@ function clampResetHours(value) {
   return hours;
 }
 
-function clampGuardMinutes(value) {
-  let minutes = parseInt(value, 10);
-  if (isNaN(minutes) || minutes < 1) minutes = 1;
-  if (minutes > 60) minutes = 60;
-  return minutes;
-}
-
 function normalizeCooldownUntil(value, now = Date.now()) {
   const timestamp = Number(value);
   return Number.isFinite(timestamp) && timestamp > now ? timestamp : null;
-}
-
-function normalizeRequireHoverTarget(value) {
-  return value === true;
 }
 
 function clampDailyLimitMinutes(value) {
   const minutes = parseInt(value, 10);
   if (isNaN(minutes) || minutes < 1) return null;
   return Math.min(minutes, MAX_DAILY_LIMIT_MINUTES);
+}
+
+function clampDailyLimitCooldownMinutes(value) {
+  const minutes = parseInt(value, 10);
+  if (isNaN(minutes) || minutes < 1) return DEFAULT_DAILY_LIMIT_COOLDOWN_MINUTES;
+  return Math.min(minutes, MAX_DAILY_LIMIT_COOLDOWN_MINUTES);
+}
+
+function normalizeDailyLimitPolicy(value) {
+  if (!value || value.mode !== "cooldown") {
+    return { mode: "block", cooldownMinutes: DEFAULT_DAILY_LIMIT_COOLDOWN_MINUTES };
+  }
+
+  return {
+    mode: "cooldown",
+    cooldownMinutes: clampDailyLimitCooldownMinutes(value.cooldownMinutes)
+  };
+}
+
+function normalizeDailyLimitPolicies(value, sites) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const trackedSites = new Set(sites || []);
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([site, policy]) => trackedSites.has(site) && policy && policy.mode === "cooldown")
+      .map(([site, policy]) => [site, normalizeDailyLimitPolicy(policy)])
+  );
+}
+
+function isDailyLimitPolicyWeaker(currentPolicy, nextPolicy) {
+  const current = normalizeDailyLimitPolicy(currentPolicy);
+  const next = normalizeDailyLimitPolicy(nextPolicy);
+
+  if (current.mode === "block") return next.mode === "cooldown";
+  if (next.mode === "block") return false;
+  return next.cooldownMinutes < current.cooldownMinutes;
+}
+
+function normalizeDailyLimitCooldowns(value, sites) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const trackedSites = new Set(sites || []);
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([site, until]) => [site, Number(until)])
+      .filter(([site, until]) => trackedSites.has(site) && Number.isFinite(until) && until > 0)
+  );
+}
+
+async function setDailyLimitPolicy(config, site, policy) {
+  const normalized = normalizeDailyLimitPolicy(policy);
+  const current = normalizeDailyLimitPolicy(config.dailyLimitPolicies[site]);
+  const nextPolicies = { ...config.dailyLimitPolicies };
+  const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
+  const nextCooldowns = { ...(storedCooldowns.dailyLimitCooldowns || {}) };
+
+  if (normalized.mode === "cooldown") {
+    nextPolicies[site] = normalized;
+    const activeCooldownUntil = Number(nextCooldowns[site]);
+    if (current.mode === "cooldown" && Number.isFinite(activeCooldownUntil)) {
+      const cooldownStartedAt = activeCooldownUntil - current.cooldownMinutes * MINUTE_MS;
+      nextCooldowns[site] = cooldownStartedAt + normalized.cooldownMinutes * MINUTE_MS;
+    }
+  } else {
+    delete nextPolicies[site];
+    delete nextCooldowns[site];
+  }
+
+  await browser.storage.local.set({
+    dailyLimitPolicies: nextPolicies,
+    dailyLimitCooldowns: nextCooldowns
+  });
 }
 
 function normalizeDailyLimits(value, sites) {
@@ -296,11 +362,15 @@ async function readDailyUsage(now = Date.now()) {
 async function getDailyLimitState(config, hostname, now = Date.now()) {
   const site = getTrackedSite(hostname, config.sites);
   const limitMinutes = site ? clampDailyLimitMinutes(config.dailyLimits[site]) : null;
+  const policy = site
+    ? normalizeDailyLimitPolicy(config.dailyLimitPolicies[site])
+    : normalizeDailyLimitPolicy(null);
 
   if (!site || limitMinutes === null) {
     return {
       site: site,
       limitMinutes: null,
+      limitMode: policy.mode,
       usedMs: 0,
       remainingMs: null,
       reached: false,
@@ -309,11 +379,59 @@ async function getDailyLimitState(config, hostname, now = Date.now()) {
   }
 
   const usage = await readDailyUsage(now);
-  const usedMs = usage.sites[site] || 0;
+  const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
+  const rawCooldowns = storedCooldowns.dailyLimitCooldowns;
+  const cooldowns = rawCooldowns && typeof rawCooldowns === "object" && !Array.isArray(rawCooldowns)
+    ? { ...rawCooldowns }
+    : {};
+  const cooldownUntil = Number(cooldowns[site]);
   const limitMs = limitMinutes * MINUTE_MS;
+  let usedMs = usage.sites[site] || 0;
+
+  if (Number.isFinite(cooldownUntil) && cooldownUntil > now) {
+    if (policy.mode === "cooldown" && usedMs >= limitMs) {
+      return {
+        site: site,
+        limitMinutes: limitMinutes,
+        limitMode: "cooldown",
+        usedMs: usedMs,
+        remainingMs: 0,
+        reached: true,
+        resetAt: cooldownUntil
+      };
+    }
+
+    delete cooldowns[site];
+    await browser.storage.local.set({ dailyLimitCooldowns: cooldowns });
+  } else if (Number.isFinite(cooldownUntil)) {
+    delete cooldowns[site];
+    delete usage.sites[site];
+    usedMs = 0;
+    await browser.storage.local.set({
+      dailyLimitCooldowns: cooldowns,
+      dailyUsage: usage
+    });
+  }
+
+  if (usedMs >= limitMs && policy.mode === "cooldown") {
+    const nextCooldownUntil = now + policy.cooldownMinutes * MINUTE_MS;
+    cooldowns[site] = nextCooldownUntil;
+    await browser.storage.local.set({ dailyLimitCooldowns: cooldowns });
+    return {
+      site: site,
+      limitMinutes: limitMinutes,
+      limitMode: "cooldown",
+      usedMs: usedMs,
+      remainingMs: 0,
+      reached: true,
+      resetAt: nextCooldownUntil
+    };
+  }
+
   return {
     site: site,
     limitMinutes: limitMinutes,
+    limitMode: policy.mode,
     usedMs: usedMs,
     remainingMs: Math.max(0, limitMs - usedMs),
     reached: usedMs >= limitMs,
@@ -325,6 +443,7 @@ function addDailyLimitMetadata(response, state) {
   return {
     ...response,
     dailyLimitMinutes: state.limitMinutes,
+    dailyLimitMode: state.limitMode,
     dailyUsageRemainingMs: state.remainingMs,
     dailyUsageResetAt: state.resetAt
   };
@@ -565,13 +684,18 @@ function describePendingConfigChange(pending) {
     return "Removing " + pending.site;
   }
 
+  if (pending.type === "disableAirlock") {
+    return "Turning off Airlock";
+  }
+
   if (pending.type === "reduceDelay") {
     const unit = pending.delayMinutes === 1 ? "minute" : "minutes";
     return "Reducing wait to " + pending.delayMinutes + " " + unit;
   }
 
-  if (pending.type === "disableHoverTarget") {
-    return "Disabling hover target";
+  if (pending.type === "increaseResetHours") {
+    const unit = pending.resetHours === 1 ? "hour" : "hours";
+    return "Increasing reset window to " + pending.resetHours + " " + unit;
   }
 
   if (pending.type === "changeDailyLimit") {
@@ -581,9 +705,10 @@ function describePendingConfigChange(pending) {
     return "Increasing daily limit for " + pending.site;
   }
 
-  if (pending.type === "reduceGuardMinutes") {
-    const unit = pending.guardMinutes === 1 ? "minute" : "minutes";
-    return "Reducing settings hold to " + pending.guardMinutes + " " + unit;
+  if (pending.type === "changeDailyLimitPolicy") {
+    return pending.previousDailyLimitPolicy.mode === "block"
+      ? "Changing limit to cooldown for " + pending.site
+      : "Reducing cooldown for " + pending.site;
   }
 
   if (pending.type === "endCooldown") {
@@ -595,7 +720,7 @@ function describePendingConfigChange(pending) {
   }
 
   if (pending.type === "changeDailyLockSchedule") {
-    return "Shortening daily lock";
+    return "Changing daily lock schedule";
   }
 
   return "Updating settings";
@@ -611,7 +736,7 @@ async function startPendingConfigChange(change) {
 
   const config = await readConfig();
   const startedAt = Date.now();
-  const waitMinutes = clampGuardMinutes(config.guardMinutes);
+  const waitMinutes = config.delayMinutes;
   const pendingBase = {
     id: String(startedAt),
     startedAt: startedAt,
@@ -620,7 +745,17 @@ async function startPendingConfigChange(change) {
 
   let pending = null;
 
-  if (change.type === "removeSite") {
+  if (change.type === "disableAirlock") {
+    if (!config.enabled) {
+      return { ok: true, applied: true, pending: null };
+    }
+
+    pending = {
+      ...pendingBase,
+      type: "disableAirlock",
+      remainingMs: waitMinutes * MINUTE_MS
+    };
+  } else if (change.type === "removeSite") {
     const site = String(change.site || "").trim().toLowerCase();
     if (!site || !config.sites.includes(site)) {
       return { ok: false, reason: "site-not-tracked", pending: null };
@@ -646,16 +781,20 @@ async function startPendingConfigChange(change) {
       remainingMs: waitMinutes * MINUTE_MS,
       delayMinutes: delayMinutes
     };
-  } else if (change.type === "disableHoverTarget") {
-    if (!config.requireHoverTarget) {
-      await browser.storage.local.set({ requireHoverTarget: false });
+  } else if (change.type === "increaseResetHours") {
+    const resetHours = clampResetHours(change.resetHours || DEFAULT_CONFIG.resetHours);
+
+    if (resetHours <= config.resetHours) {
+      await browser.storage.local.set({ resetHours: resetHours });
       return { ok: true, applied: true, pending: null };
     }
 
     pending = {
       ...pendingBase,
-      type: "disableHoverTarget",
-      remainingMs: waitMinutes * MINUTE_MS
+      type: "increaseResetHours",
+      remainingMs: waitMinutes * MINUTE_MS,
+      resetHours: resetHours,
+      previousResetHours: config.resetHours
     };
   } else if (change.type === "changeDailyLimit") {
     const site = String(change.site || "").trim().toLowerCase();
@@ -689,19 +828,27 @@ async function startPendingConfigChange(change) {
       dailyLimitMinutes: dailyLimitMinutes,
       remainingMs: waitMinutes * MINUTE_MS
     };
-  } else if (change.type === "reduceGuardMinutes") {
-    const guardMinutes = clampGuardMinutes(change.guardMinutes || DEFAULT_CONFIG.guardMinutes);
+  } else if (change.type === "changeDailyLimitPolicy") {
+    const site = String(change.site || "").trim().toLowerCase();
+    const currentPolicy = normalizeDailyLimitPolicy(config.dailyLimitPolicies[site]);
+    const dailyLimitPolicy = normalizeDailyLimitPolicy(change.dailyLimitPolicy);
 
-    if (guardMinutes >= config.guardMinutes) {
-      await browser.storage.local.set({ guardMinutes: guardMinutes });
+    if (!site || !config.sites.includes(site) || !config.dailyLimits[site]) {
+      return { ok: false, reason: "invalid-daily-limit-policy", pending: null };
+    }
+
+    if (!isDailyLimitPolicyWeaker(currentPolicy, dailyLimitPolicy)) {
+      await setDailyLimitPolicy(config, site, dailyLimitPolicy);
       return { ok: true, applied: true, pending: null };
     }
 
     pending = {
       ...pendingBase,
-      type: "reduceGuardMinutes",
-      remainingMs: waitMinutes * MINUTE_MS,
-      guardMinutes: guardMinutes
+      type: "changeDailyLimitPolicy",
+      site: site,
+      dailyLimitPolicy: dailyLimitPolicy,
+      previousDailyLimitPolicy: currentPolicy,
+      remainingMs: waitMinutes * MINUTE_MS
     };
   } else if (change.type === "endCooldown") {
     if (!config.cooldownUntil) {
@@ -727,17 +874,16 @@ async function startPendingConfigChange(change) {
   } else if (change.type === "changeDailyLockSchedule") {
     const dailyLockStart = dailyLockApi.normalizeTimeOfDay(change.dailyLockStart, null);
     const dailyLockEnd = dailyLockApi.normalizeTimeOfDay(change.dailyLockEnd, null);
-    const currentDuration = dailyLockApi.getDurationMinutes(
-      config.dailyLockStart,
-      config.dailyLockEnd
-    );
     const nextDuration = dailyLockApi.getDurationMinutes(dailyLockStart, dailyLockEnd);
 
     if (!dailyLockStart || !dailyLockEnd || nextDuration === 0) {
       return { ok: false, reason: "invalid-schedule", pending: null };
     }
 
-    if (!config.dailyLockEnabled || nextDuration >= currentDuration) {
+    if (
+      !config.dailyLockEnabled ||
+      (dailyLockStart === config.dailyLockStart && dailyLockEnd === config.dailyLockEnd)
+    ) {
       await browser.storage.local.set({
         dailyLockStart: dailyLockStart,
         dailyLockEnd: dailyLockEnd
@@ -752,8 +898,7 @@ async function startPendingConfigChange(change) {
       dailyLockStart: dailyLockStart,
       dailyLockEnd: dailyLockEnd,
       previousDailyLockStart: config.dailyLockStart,
-      previousDailyLockEnd: config.dailyLockEnd,
-      previousDurationMinutes: currentDuration
+      previousDailyLockEnd: config.dailyLockEnd
     };
   } else {
     return { ok: false, reason: "unknown-change", pending: null };
@@ -863,25 +1008,42 @@ function getPendingRemainingMs(pending) {
     return Math.max(0, pending.unlockAt - Date.now());
   }
 
-  const waitMinutes = clampGuardMinutes(pending.waitMinutes || DEFAULT_CONFIG.guardMinutes);
+  const waitMinutes = clampDelayMinutes(pending.waitMinutes || DEFAULT_CONFIG.delayMinutes);
   return waitMinutes * MINUTE_MS;
 }
 
 async function applyPendingConfigChange(pending) {
   const config = await readConfig();
 
-  if (pending.type === "removeSite") {
+  if (pending.type === "disableAirlock") {
+    if (config.enabled) {
+      await browser.storage.local.set({ enabled: false });
+    }
+  } else if (pending.type === "removeSite") {
     const nextSites = config.sites.filter((site) => site !== pending.site);
     const nextDailyLimits = { ...config.dailyLimits };
+    const nextPolicies = { ...config.dailyLimitPolicies };
+    const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
+    const nextCooldowns = { ...(storedCooldowns.dailyLimitCooldowns || {}) };
     delete nextDailyLimits[pending.site];
-    await browser.storage.local.set({ sites: nextSites, dailyLimits: nextDailyLimits });
+    delete nextPolicies[pending.site];
+    delete nextCooldowns[pending.site];
+    await browser.storage.local.set({
+      sites: nextSites,
+      dailyLimits: nextDailyLimits,
+      dailyLimitPolicies: nextPolicies,
+      dailyLimitCooldowns: nextCooldowns
+    });
   } else if (pending.type === "reduceDelay") {
     const delayMinutes = clampDelayMinutes(pending.delayMinutes || DEFAULT_CONFIG.delayMinutes);
     if (delayMinutes < config.delayMinutes && config.delayMinutes <= pending.waitMinutes) {
       await browser.storage.local.set({ delayMinutes: delayMinutes });
     }
-  } else if (pending.type === "disableHoverTarget") {
-    await browser.storage.local.set({ requireHoverTarget: false });
+  } else if (pending.type === "increaseResetHours") {
+    const resetHours = clampResetHours(pending.resetHours || DEFAULT_CONFIG.resetHours);
+    if (config.resetHours === pending.previousResetHours && resetHours > config.resetHours) {
+      await browser.storage.local.set({ resetHours: resetHours });
+    }
   } else if (pending.type === "changeDailyLimit" && config.sites.includes(pending.site)) {
     const nextDailyLimits = { ...config.dailyLimits };
     if (pending.dailyLimitMinutes === null) {
@@ -889,11 +1051,23 @@ async function applyPendingConfigChange(pending) {
     } else {
       nextDailyLimits[pending.site] = clampDailyLimitMinutes(pending.dailyLimitMinutes);
     }
-    await browser.storage.local.set({ dailyLimits: nextDailyLimits });
-  } else if (pending.type === "reduceGuardMinutes") {
-    const guardMinutes = clampGuardMinutes(pending.guardMinutes || DEFAULT_CONFIG.guardMinutes);
-    if (guardMinutes < config.guardMinutes && config.guardMinutes <= pending.waitMinutes) {
-      await browser.storage.local.set({ guardMinutes: guardMinutes });
+    const updates = { dailyLimits: nextDailyLimits };
+    if (pending.dailyLimitMinutes === null) {
+      const nextPolicies = { ...config.dailyLimitPolicies };
+      const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
+      const nextCooldowns = { ...(storedCooldowns.dailyLimitCooldowns || {}) };
+      delete nextPolicies[pending.site];
+      delete nextCooldowns[pending.site];
+      updates.dailyLimitPolicies = nextPolicies;
+      updates.dailyLimitCooldowns = nextCooldowns;
+    }
+    await browser.storage.local.set(updates);
+  } else if (pending.type === "changeDailyLimitPolicy" && config.sites.includes(pending.site)) {
+    const currentPolicy = normalizeDailyLimitPolicy(config.dailyLimitPolicies[pending.site]);
+    if (
+      JSON.stringify(currentPolicy) === JSON.stringify(pending.previousDailyLimitPolicy)
+    ) {
+      await setDailyLimitPolicy(config, pending.site, pending.dailyLimitPolicy);
     }
   } else if (pending.type === "endCooldown") {
     if (config.cooldownUntil && config.cooldownUntil === pending.cooldownUntil) {
@@ -971,6 +1145,7 @@ async function reconcileExpiredSessions() {
         type: "SHOW_DAILY_LIMIT",
         resetAt: dailyLimitState.resetAt,
         limitMinutes: dailyLimitState.limitMinutes,
+        dailyLimitMode: dailyLimitState.limitMode,
         usedMs: dailyLimitState.usedMs
       });
     } else {
@@ -978,7 +1153,6 @@ async function reconcileExpiredSessions() {
         type: "RESET_TIMER",
         remainingMs: nextSession.remainingMs,
         active: await isTabActiveAndFocused(tabId),
-        requireHoverTarget: config.requireHoverTarget,
         dailyLimitMinutes: dailyLimitState.limitMinutes,
         dailyUsageRemainingMs: dailyLimitState.remainingMs,
         dailyUsageResetAt: dailyLimitState.resetAt
@@ -1025,6 +1199,8 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     changes.enabled ||
     changes.sites ||
     changes.dailyLimits ||
+    changes.dailyLimitPolicies ||
+    changes.dailyLimitCooldowns ||
     changes.dailyLockEnabled ||
     changes.dailyLockStart ||
     changes.dailyLockEnd
@@ -1177,8 +1353,7 @@ async function handleContentReady(tabId, domain) {
   if (!isDomainTracked(domain, config.sites)) {
     return {
       type: "NO_OVERLAY",
-      active: active,
-      requireHoverTarget: config.requireHoverTarget
+      active: active
     };
   }
 
@@ -1186,16 +1361,14 @@ async function handleContentReady(tabId, domain) {
     return {
       type: "SHOW_COOLDOWN",
       unlockAt: config.cooldownUntil,
-      active: active,
-      requireHoverTarget: config.requireHoverTarget
+      active: active
     };
   }
 
   if (!config.enabled) {
     return {
       type: "NO_OVERLAY",
-      active: active,
-      requireHoverTarget: config.requireHoverTarget
+      active: active
     };
   }
 
@@ -1204,8 +1377,7 @@ async function handleContentReady(tabId, domain) {
     return {
       type: "SHOW_DAILY_LOCK",
       unlockAt: dailyLockState.unlockAt,
-      active: active,
-      requireHoverTarget: config.requireHoverTarget
+      active: active
     };
   }
 
@@ -1215,9 +1387,9 @@ async function handleContentReady(tabId, domain) {
       type: "SHOW_DAILY_LIMIT",
       resetAt: dailyLimitState.resetAt,
       limitMinutes: dailyLimitState.limitMinutes,
+      dailyLimitMode: dailyLimitState.limitMode,
       usedMs: dailyLimitState.usedMs,
-      active: active,
-      requireHoverTarget: config.requireHoverTarget
+      active: active
     };
   }
 
@@ -1244,8 +1416,7 @@ async function handleContentReady(tabId, domain) {
         type: "SHOW_OVERLAY",
         remainingMs: nextSession.remainingMs,
         resetAt: nextSession.expiresAt,
-        active: active,
-        requireHoverTarget: config.requireHoverTarget
+        active: active
       }, dailyLimitState);
     }
 
@@ -1253,24 +1424,21 @@ async function handleContentReady(tabId, domain) {
       return addDailyLimitMetadata({
         type: "NO_OVERLAY",
         resetAt: resetAt,
-        active: active,
-        requireHoverTarget: config.requireHoverTarget
+        active: active
       }, dailyLimitState);
     }
     if (session.remainingMs <= 0) {
       return addDailyLimitMetadata({
         type: "NO_OVERLAY",
         resetAt: resetAt,
-        active: active,
-        requireHoverTarget: config.requireHoverTarget
+        active: active
       }, dailyLimitState);
     }
     return addDailyLimitMetadata({
       type: "SHOW_OVERLAY",
       remainingMs: session.remainingMs,
       resetAt: resetAt,
-      active: active,
-      requireHoverTarget: config.requireHoverTarget
+      active: active
     }, dailyLimitState);
   }
 
@@ -1280,8 +1448,7 @@ async function handleContentReady(tabId, domain) {
     type: "SHOW_OVERLAY",
     remainingMs: nextSession.remainingMs,
     resetAt: nextSession.expiresAt,
-    active: active,
-    requireHoverTarget: config.requireHoverTarget
+    active: active
   }, dailyLimitState);
 }
 
@@ -1307,6 +1474,7 @@ async function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
       reached: state.reached,
       resetAt: state.resetAt,
       limitMinutes: state.limitMinutes,
+      dailyLimitMode: state.limitMode,
       remainingMs: state.remainingMs
     };
   }
@@ -1319,14 +1487,24 @@ async function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
 
   const reached = usedMs >= limitMs;
   if (reached) {
+    const reachedState = await getDailyLimitState(config, domain, now);
     await broadcastConfigRecheck();
+    return {
+      ok: true,
+      reached: true,
+      resetAt: reachedState.resetAt,
+      limitMinutes: reachedState.limitMinutes,
+      dailyLimitMode: reachedState.limitMode,
+      remainingMs: 0
+    };
   }
 
   return {
     ok: true,
-    reached: reached,
+    reached: false,
     resetAt: state.resetAt,
     limitMinutes: state.limitMinutes,
+    dailyLimitMode: state.limitMode,
     remainingMs: Math.max(0, limitMs - usedMs)
   };
 }

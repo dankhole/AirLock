@@ -14,7 +14,6 @@
     config = await browser.storage.local.get([
       "enabled",
       "sites",
-      "requireHoverTarget",
       "cooldownUntil"
     ]);
   } catch (e) {
@@ -29,8 +28,8 @@
   let response = {
     type: "NO_OVERLAY",
     active: false,
-    requireHoverTarget: config.requireHoverTarget === true,
     dailyLimitMinutes: null,
+    dailyLimitMode: "block",
     dailyUsageRemainingMs: null,
     dailyUsageResetAt: null
   };
@@ -71,6 +70,9 @@
   let dailyLimitMinutes = response && Number.isFinite(response.dailyLimitMinutes)
     ? response.dailyLimitMinutes
     : null;
+  let dailyLimitMode = response && response.dailyLimitMode === "cooldown"
+    ? "cooldown"
+    : "block";
   let dailyUsageRemainingMs = response && Number.isFinite(response.dailyUsageRemainingMs)
     ? response.dailyUsageRemainingMs
     : null;
@@ -78,9 +80,6 @@
     ? response.dailyUsageResetAt
     : null;
   let backgroundActive = response ? response.active !== false : false;
-  let requireHoverTarget = shouldShowTimer
-    ? response.requireHoverTarget === true
-    : config.requireHoverTarget === true;
   let hoverTargetEngaged = false;
   let hoverTargetPointerInside = false;
   let hoverTargetPressed = false;
@@ -378,10 +377,17 @@
     }
 
     if (isDailyLimit) {
-      setMessageText("Daily limit reached");
-      setTimerText(formatDailyLimit(dailyLimitMinutes));
+      const isLimitCooldown = dailyLimitMode === "cooldown";
+      setMessageText(isLimitCooldown ? "Site cooldown until" : "Daily limit reached");
+      setTimerText(
+        isLimitCooldown ? formatClockTime(dailyLockUntil) : formatDailyLimit(dailyLimitMinutes)
+      );
       setTimerPaused(false);
-      setPausedLabelText("Access resets at " + formatClockTime(dailyLockUntil));
+      setPausedLabelText(
+        isLimitCooldown
+          ? "Site usage resets when the cooldown ends"
+          : "Access resets at " + formatClockTime(dailyLockUntil)
+      );
       setContinueVisible(false);
       return;
     }
@@ -450,7 +456,7 @@
   }
 
   function getPausedLabel() {
-    if (requireHoverTarget && !isHoverTargetSatisfied() && backgroundActive && isPageActive()) {
+    if (!isHoverTargetSatisfied() && backgroundActive && isPageActive()) {
       return "Hover the circle";
     }
 
@@ -544,8 +550,9 @@
     showHardLock("dailyLock", unlockAt);
   }
 
-  function showDailyLimit(resetAt, limitMinutes) {
+  function showDailyLimit(resetAt, limitMinutes, limitMode = "block") {
     dailyLimitMinutes = Number.isFinite(limitMinutes) ? limitMinutes : dailyLimitMinutes;
+    dailyLimitMode = limitMode === "cooldown" ? "cooldown" : "block";
     showHardLock("dailyLimit", resetAt);
   }
 
@@ -609,7 +616,7 @@
   }
 
   function isHoverTargetSatisfied() {
-    return !requireHoverTarget || hoverTargetEngaged;
+    return hoverTargetEngaged;
   }
 
   function canRunTimer() {
@@ -626,7 +633,7 @@
   function updateHoverTargetState() {
     if (!hoverTarget) return;
 
-    const hoverRequired = overlayMode === "timer" && requireHoverTarget;
+    const hoverRequired = overlayMode === "timer";
     hoverTarget.classList.toggle("hover-target-required", hoverRequired);
     hoverTarget.classList.toggle("hover-target-active", hoverRequired && hoverTargetEngaged);
     hoverTarget.title = overlayMode === "dailyLock"
@@ -641,7 +648,6 @@
   function updateHoverTargetGate() {
     const nextEngaged =
       overlayMode === "timer" &&
-      requireHoverTarget &&
       (hoverTargetPointerInside || hoverTargetPressed);
     if (hoverTargetEngaged !== nextEngaged) {
       hoverTargetEngaged = nextEngaged;
@@ -653,7 +659,7 @@
   }
 
   function setHoverTargetPointerInside(nextInside) {
-    const normalized = overlayMode === "timer" && requireHoverTarget && nextInside === true;
+    const normalized = overlayMode === "timer" && nextInside === true;
     if (hoverTargetPointerInside === normalized) return;
 
     hoverTargetPointerInside = normalized;
@@ -661,7 +667,7 @@
   }
 
   function setHoverTargetPressed(nextPressed) {
-    const normalized = overlayMode === "timer" && requireHoverTarget && nextPressed === true;
+    const normalized = overlayMode === "timer" && nextPressed === true;
     if (hoverTargetPressed === normalized) return;
 
     hoverTargetPressed = normalized;
@@ -672,23 +678,6 @@
     hoverTargetPointerInside = false;
     hoverTargetPressed = false;
     updateHoverTargetGate();
-  }
-
-  function setRequireHoverTarget(nextRequired) {
-    const normalized = nextRequired === true;
-    if (requireHoverTarget === normalized) return;
-
-    requireHoverTarget = normalized;
-    if (!requireHoverTarget) {
-      hoverTargetEngaged = false;
-      hoverTargetPointerInside = false;
-      hoverTargetPressed = false;
-    } else {
-      hoverTargetEngaged = hoverTargetPointerInside || hoverTargetPressed;
-    }
-    updateHoverTargetState();
-    setRunning(canRunTimer(), { persistPaused: true });
-    updateDisplay();
   }
 
   function setRunning(nextRunning, options = {}) {
@@ -839,6 +828,9 @@
     dailyLimitMinutes = nextResponse && Number.isFinite(nextResponse.dailyLimitMinutes)
       ? nextResponse.dailyLimitMinutes
       : null;
+    dailyLimitMode = nextResponse && nextResponse.dailyLimitMode === "cooldown"
+      ? "cooldown"
+      : "block";
     dailyUsageRemainingMs = nextResponse && Number.isFinite(nextResponse.dailyUsageRemainingMs)
       ? nextResponse.dailyUsageRemainingMs
       : null;
@@ -898,7 +890,7 @@
           ? result.resetAt
           : dailyUsageResetAt;
         if (result.reached) {
-          showDailyLimit(result.resetAt, result.limitMinutes);
+          showDailyLimit(result.resetAt, result.limitMinutes, result.dailyLimitMode);
         }
       })
       .catch(() => {
@@ -923,13 +915,12 @@
 
     if (nextResponse && nextResponse.type === "SHOW_DAILY_LIMIT") {
       configureDailyUsage(null);
-      showDailyLimit(nextResponse.resetAt, nextResponse.limitMinutes);
+      showDailyLimit(nextResponse.resetAt, nextResponse.limitMinutes, nextResponse.dailyLimitMode);
       return;
     }
 
     if (nextResponse && nextResponse.type === "SHOW_OVERLAY") {
       configureDailyUsage(nextResponse);
-      setRequireHoverTarget(nextResponse.requireHoverTarget);
       showOverlay(nextResponse.remainingMs, nextResponse.active);
       return;
     }
@@ -999,12 +990,11 @@
       setBackgroundActive(message.active);
     } else if (message.type === "RESET_TIMER") {
       configureDailyUsage(message);
-      setRequireHoverTarget(message.requireHoverTarget);
       showOverlay(message.remainingMs, message.active);
     } else if (message.type === "SHOW_DAILY_LOCK") {
       showDailyLock(message.unlockAt);
     } else if (message.type === "SHOW_DAILY_LIMIT") {
-      showDailyLimit(message.resetAt, message.limitMinutes);
+      showDailyLimit(message.resetAt, message.limitMinutes, message.dailyLimitMode);
     } else if (message.type === "SHOW_COOLDOWN") {
       showCooldown(message.unlockAt);
     } else if (message.type === "RECHECK_CONFIG") {
@@ -1029,10 +1019,6 @@
       }
     }
 
-    if (areaName === "local" && changes.requireHoverTarget) {
-      setRequireHoverTarget(changes.requireHoverTarget.newValue);
-    }
-
     if (areaName === "local" && changes.cooldownUntil) {
       recheckConfig();
     }
@@ -1047,7 +1033,7 @@
   } else if (shouldShowDailyLock) {
     showDailyLock(response.unlockAt);
   } else if (shouldShowDailyLimit) {
-    showDailyLimit(response.resetAt, response.limitMinutes);
+    showDailyLimit(response.resetAt, response.limitMinutes, response.dailyLimitMode);
   } else {
     startDailyUsageTracking();
   }
