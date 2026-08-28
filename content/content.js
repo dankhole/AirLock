@@ -5,6 +5,9 @@
 (async function () {
   const TIMER_TICK_MS = 250;
   const DAILY_USAGE_TICK_MS = 1000;
+  const MOVING_TARGET_SPEED_X = 38;
+  const MOVING_TARGET_SPEED_Y = 29;
+  const MOVING_TARGET_VIEWPORT_PADDING = 16;
 
   const hostname = window.location.hostname;
   if (!hostname) return;
@@ -14,7 +17,8 @@
     config = await browser.storage.local.get([
       "enabled",
       "sites",
-      "cooldownUntil"
+      "cooldownUntil",
+      "movingTargetEnabled"
     ]);
   } catch (e) {
     console.warn("[Airlock] Failed to read config:", e);
@@ -80,6 +84,7 @@
     ? response.dailyUsageResetAt
     : null;
   let backgroundActive = response ? response.active !== false : false;
+  let movingTargetEnabled = config.movingTargetEnabled === true;
   let hoverTargetEngaged = false;
   let hoverTargetPointerInside = false;
   let hoverTargetPressed = false;
@@ -102,6 +107,16 @@
   let continueBtn = null;
   let backdrop = null;
   let hoverTarget = null;
+  let hoverTargetSlot = null;
+  let movingTargetFrame = null;
+  let movingTargetLastFrameAt = null;
+  let movingTargetOffsetX = 0;
+  let movingTargetOffsetY = 0;
+  let movingTargetVelocityX = MOVING_TARGET_SPEED_X;
+  let movingTargetVelocityY = MOVING_TARGET_SPEED_Y;
+  const reducedMotionQuery = typeof window.matchMedia === "function"
+    ? window.matchMedia("(prefers-reduced-motion: reduce)")
+    : null;
   let lastTimerText = null;
   let lastMessageText = null;
   let lastPausedLabelText = null;
@@ -161,8 +176,13 @@
           flex-direction: column;
           align-items: center;
           gap: 32px;
-          contain: layout style paint;
+          contain: layout style;
           user-select: none;
+        }
+        .hover-target-slot {
+          width: 168px;
+          height: 168px;
+          flex: 0 0 auto;
         }
         .hover-target {
           width: 168px;
@@ -174,6 +194,10 @@
           border-radius: 50%;
           contain: layout style paint;
           touch-action: none;
+        }
+        .hover-target.moving {
+          z-index: 1;
+          will-change: transform;
         }
         .hover-target::before {
           content: "";
@@ -295,8 +319,10 @@
       </style>
       <div class="backdrop">
         <div class="card">
-          <div class="hover-target" id="hover-target" title="Hover to run timer">
-            <div class="breathing-circle"></div>
+          <div class="hover-target-slot" id="hover-target-slot">
+            <div class="hover-target" id="hover-target" title="Hover to run timer">
+              <div class="breathing-circle"></div>
+            </div>
           </div>
           <div class="message" id="overlay-message">Take a moment...</div>
           <div class="timer" id="timer-display">0:00</div>
@@ -315,6 +341,7 @@
     pausedLabel = shadowRoot.getElementById("paused-label");
     continueBtn = shadowRoot.getElementById("continue-btn");
     hoverTarget = shadowRoot.getElementById("hover-target");
+    hoverTargetSlot = shadowRoot.getElementById("hover-target-slot");
     continueBtn.addEventListener("click", () => dismissOverlay());
     hoverTarget.addEventListener("pointerenter", (event) => {
       setHoverTargetPointerInside(event.pointerType !== "touch");
@@ -339,6 +366,7 @@
 
     updateHoverTargetState();
     updateDisplay();
+    syncMovingTargetAnimation();
 
     // Trigger fade-in on next frame
     requestAnimationFrame(() => {
@@ -479,6 +507,7 @@
     clearDailyLockTimeout();
     stopActiveStatePolling();
     stopDailyUsageTracking();
+    stopMovingTargetAnimation();
     running = false;
     overlayMode = null;
     dailyLockUntil = null;
@@ -519,6 +548,7 @@
     continueBtn = null;
     backdrop = null;
     hoverTarget = null;
+    hoverTargetSlot = null;
     lastTimerText = null;
     lastMessageText = null;
     lastPausedLabelText = null;
@@ -650,6 +680,120 @@
         : hoverRequired
           ? "Hover to run timer"
           : "";
+    syncMovingTargetAnimation();
+  }
+
+  function shouldAnimateMovingTarget() {
+    return Boolean(
+      movingTargetEnabled &&
+      (!reducedMotionQuery || !reducedMotionQuery.matches) &&
+      overlay &&
+      hoverTarget &&
+      hoverTargetSlot &&
+      overlayMode === "timer" &&
+      remainingMs > 0
+    );
+  }
+
+  function syncMovingTargetAnimation() {
+    if (!shouldAnimateMovingTarget()) {
+      stopMovingTargetAnimation();
+      return;
+    }
+
+    if (movingTargetFrame !== null) return;
+    hoverTarget.classList.add("moving");
+    movingTargetLastFrameAt = null;
+    movingTargetFrame = requestAnimationFrame(runMovingTargetFrame);
+  }
+
+  function stopMovingTargetAnimation() {
+    if (movingTargetFrame !== null) {
+      cancelAnimationFrame(movingTargetFrame);
+      movingTargetFrame = null;
+    }
+    movingTargetLastFrameAt = null;
+    movingTargetOffsetX = 0;
+    movingTargetOffsetY = 0;
+    movingTargetVelocityX = MOVING_TARGET_SPEED_X;
+    movingTargetVelocityY = MOVING_TARGET_SPEED_Y;
+    if (hoverTarget) {
+      hoverTarget.classList.remove("moving");
+      hoverTarget.style.transform = "";
+    }
+  }
+
+  function runMovingTargetFrame(timestamp) {
+    movingTargetFrame = null;
+    if (!shouldAnimateMovingTarget()) {
+      stopMovingTargetAnimation();
+      return;
+    }
+
+    if (movingTargetLastFrameAt !== null) {
+      const elapsedSeconds = Math.min(0.1, Math.max(0, timestamp - movingTargetLastFrameAt) / 1000);
+      const bounds = getMovingTargetBounds();
+      const horizontal = advanceBouncingAxis(
+        movingTargetOffsetX,
+        movingTargetVelocityX,
+        elapsedSeconds,
+        bounds.minX,
+        bounds.maxX
+      );
+      const vertical = advanceBouncingAxis(
+        movingTargetOffsetY,
+        movingTargetVelocityY,
+        elapsedSeconds,
+        bounds.minY,
+        bounds.maxY
+      );
+      movingTargetOffsetX = horizontal.position;
+      movingTargetVelocityX = horizontal.velocity;
+      movingTargetOffsetY = vertical.position;
+      movingTargetVelocityY = vertical.velocity;
+      hoverTarget.style.transform =
+        "translate3d(" + movingTargetOffsetX.toFixed(2) + "px, " +
+        movingTargetOffsetY.toFixed(2) + "px, 0)";
+    }
+
+    movingTargetLastFrameAt = timestamp;
+    movingTargetFrame = requestAnimationFrame(runMovingTargetFrame);
+  }
+
+  function getMovingTargetBounds() {
+    const rect = hoverTargetSlot.getBoundingClientRect();
+    const minX = MOVING_TARGET_VIEWPORT_PADDING - rect.left;
+    const maxX = window.innerWidth - MOVING_TARGET_VIEWPORT_PADDING - rect.right;
+    const minY = MOVING_TARGET_VIEWPORT_PADDING - rect.top;
+    const maxY = window.innerHeight - MOVING_TARGET_VIEWPORT_PADDING - rect.bottom;
+    const horizontalMidpoint = (minX + maxX) / 2;
+    const verticalMidpoint = (minY + maxY) / 2;
+
+    return {
+      minX: minX <= maxX ? minX : horizontalMidpoint,
+      maxX: minX <= maxX ? maxX : horizontalMidpoint,
+      minY: minY <= maxY ? minY : verticalMidpoint,
+      maxY: minY <= maxY ? maxY : verticalMidpoint
+    };
+  }
+
+  function advanceBouncingAxis(position, velocity, elapsedSeconds, min, max) {
+    if (max <= min) return { position: min, velocity: velocity };
+
+    let nextPosition = Math.min(max, Math.max(min, position)) + velocity * elapsedSeconds;
+    let nextVelocity = velocity;
+
+    while (nextPosition < min || nextPosition > max) {
+      if (nextPosition > max) {
+        nextPosition = max - (nextPosition - max);
+        nextVelocity = -Math.abs(nextVelocity);
+      } else {
+        nextPosition = min + (min - nextPosition);
+        nextVelocity = Math.abs(nextVelocity);
+      }
+    }
+
+    return { position: nextPosition, velocity: nextVelocity };
   }
 
   function updateHoverTargetGate() {
@@ -986,6 +1130,18 @@
   });
   window.addEventListener("focus", () => resumeTimer());
 
+  if (reducedMotionQuery) {
+    const handleReducedMotionChange = () => {
+      resetHoverTargetGate();
+      syncMovingTargetAnimation();
+    };
+    if (typeof reducedMotionQuery.addEventListener === "function") {
+      reducedMotionQuery.addEventListener("change", handleReducedMotionChange);
+    } else if (typeof reducedMotionQuery.addListener === "function") {
+      reducedMotionQuery.addListener(handleReducedMotionChange);
+    }
+  }
+
   browser.runtime.onMessage.addListener((message) => {
     if (message.type === "PAUSE") {
       setBackgroundActive(false);
@@ -1012,6 +1168,12 @@
   // --- Extension Toggle Listener ---
 
   browser.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === "local" && changes.movingTargetEnabled) {
+      movingTargetEnabled = changes.movingTargetEnabled.newValue === true;
+      resetHoverTargetGate();
+      syncMovingTargetAnimation();
+    }
+
     if (areaName === "local" && changes.enabled) {
       recheckConfig();
     }

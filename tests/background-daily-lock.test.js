@@ -470,6 +470,7 @@ test("legacy wait and unlock hold settings migrate to one stricter wait", async 
   );
 
   assert.equal(state.localData.delayMinutes, 5);
+  assert.equal(state.localData.movingTargetEnabled, false);
   assert.equal(state.localData.guardMinutes, undefined);
   assert.equal(state.localData.requireHoverTarget, undefined);
 });

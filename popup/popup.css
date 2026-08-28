@@ -190,6 +190,30 @@ body {
   color: #888;
 }
 
+/* Moving Target */
+.motion-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: white;
+  border: 1px solid #e8eaf0;
+  border-radius: 8px;
+}
+
+.motion-section h2 {
+  color: #555;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.motion-section p {
+  margin-top: 2px;
+  color: #999;
+  font-size: 11px;
+}
+
 /* Cooldown */
 .cooldown-section {
   display: flex;

@@ -7,6 +7,7 @@ const DEFAULT_CONFIG = {
   sites: [],
   delayMinutes: 1,
   resetHours: 24,
+  movingTargetEnabled: false,
   dailyLimits: {},
   dailyLimitPolicies: {},
   cooldownUntil: null,
@@ -69,6 +70,7 @@ async function migrateStoredConfig() {
     "delayMinutes",
     "delaySeconds",
     "resetHours",
+    "movingTargetEnabled",
     "requireHoverTarget",
     "dailyLimits",
     "dailyLimitPolicies",
@@ -97,6 +99,10 @@ async function migrateStoredConfig() {
   } else {
     const resetHours = clampResetHours(existing.resetHours);
     if (resetHours !== existing.resetHours) updates.resetHours = resetHours;
+  }
+
+  if (typeof existing.movingTargetEnabled !== "boolean") {
+    updates.movingTargetEnabled = DEFAULT_CONFIG.movingTargetEnabled;
   }
 
   const dailyLimits = normalizeDailyLimits(existing.dailyLimits, existing.sites || []);

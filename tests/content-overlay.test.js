@@ -21,17 +21,23 @@ function createClassList() {
     toggle(value, force) {
       if (force) values.add(value);
       else values.delete(value);
+    },
+    contains(value) {
+      return values.has(value);
     }
   };
 }
 
-function createElement(onRemove = () => {}) {
+function createElement(onRemove = () => {}, rect = null) {
   return {
     style: {},
     classList: createClassList(),
     textContent: "",
     addEventListener() {},
-    remove: onRemove
+    remove: onRemove,
+    getBoundingClientRect() {
+      return rect || { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+    }
   };
 }
 
@@ -60,8 +66,13 @@ function createDocument() {
         "timer-display": createElement(),
         "paused-label": createElement(),
         "continue-btn": createElement(),
-        "hover-target": createElement()
+        "hover-target": createElement(),
+        "hover-target-slot": createElement(
+          () => {},
+          { left: 116, top: 116, right: 284, bottom: 284, width: 168, height: 168 }
+        )
       };
+      this.latestElements = elements;
       host.attachShadow = () => ({
         innerHTML: "",
         querySelector(selector) {
@@ -82,14 +93,20 @@ function createDocument() {
   };
 }
 
-function createContext(document) {
+function createContext(document, options = {}) {
   let timerId = 0;
+  let animationFrameId = 0;
+  const animationFrames = new Map();
   const event = { addListener() {} };
   const browser = {
     storage: {
       local: {
         async get() {
-          return { enabled: true, sites: ["example.com"] };
+          return {
+            enabled: true,
+            sites: ["example.com"],
+            movingTargetEnabled: options.movingTargetEnabled === true
+          };
         }
       },
       onChanged: event
@@ -111,16 +128,26 @@ function createContext(document) {
     }
   };
 
-  return vm.createContext({
+  const context = vm.createContext({
     browser: browser,
     console: console,
     document: document,
     window: {
       location: { hostname: "example.com" },
+      innerWidth: 400,
+      innerHeight: 400,
+      matchMedia() {
+        return { matches: options.reducedMotion === true, addEventListener() {} };
+      },
       addEventListener() {}
     },
     requestAnimationFrame(callback) {
-      callback();
+      animationFrameId += 1;
+      animationFrames.set(animationFrameId, callback);
+      return animationFrameId;
+    },
+    cancelAnimationFrame(id) {
+      animationFrames.delete(id);
     },
     setTimeout() {
       timerId += 1;
@@ -133,6 +160,13 @@ function createContext(document) {
     },
     clearInterval() {}
   });
+
+  context.runAnimationFrames = (timestamp) => {
+    const callbacks = [...animationFrames.values()];
+    animationFrames.clear();
+    callbacks.forEach((callback) => callback(timestamp));
+  };
+  return context;
 }
 
 test("duplicate content-script injection replaces an orphaned overlay", async () => {
@@ -147,4 +181,40 @@ test("duplicate content-script injection replaces an orphaned overlay", async ()
 
   assert.equal(document.overlayHosts.length, 1);
   assert.notEqual(document.overlayHosts[0], firstHost);
+});
+
+test("moving target bounces within the padded viewport", async () => {
+  const document = createDocument();
+  const context = createContext(document, { movingTargetEnabled: true });
+
+  await vm.runInContext(contentSource, context);
+  const target = document.latestElements["hover-target"];
+  const positions = [];
+
+  for (let frame = 0; frame < 80; frame += 1) {
+    context.runAnimationFrames(frame * 100);
+    const match = /translate3d\((-?[\d.]+)px,/.exec(target.style.transform || "");
+    if (match) positions.push(Number(match[1]));
+  }
+
+  assert.equal(target.classList.contains("moving"), true);
+  assert.ok(positions.length > 0);
+  assert.ok(Math.max(...positions) <= 100);
+  assert.ok(Math.min(...positions) >= -100);
+  assert.ok(positions.some((position, index) => index > 0 && position < positions[index - 1]));
+});
+
+test("reduced motion keeps an enabled moving target stationary", async () => {
+  const document = createDocument();
+  const context = createContext(document, {
+    movingTargetEnabled: true,
+    reducedMotion: true
+  });
+
+  await vm.runInContext(contentSource, context);
+  context.runAnimationFrames(0);
+
+  const target = document.latestElements["hover-target"];
+  assert.equal(target.classList.contains("moving"), false);
+  assert.equal(target.style.transform, "");
 });

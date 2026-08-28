@@ -4,6 +4,7 @@ const dailyLockApi = globalThis.AirlockDailyLock;
 const enabledToggle = document.getElementById("enabled-toggle");
 const delayInput = document.getElementById("delay-input");
 const resetInput = document.getElementById("reset-input");
+const movingTargetToggle = document.getElementById("moving-target-toggle");
 const cooldownSection = document.querySelector(".cooldown-section");
 const cooldownStatus = document.getElementById("cooldown-status");
 const cooldownBtn = document.getElementById("cooldown-btn");
@@ -61,6 +62,7 @@ browser.storage.local.get([
   "sites",
   "delayMinutes",
   "resetHours",
+  "movingTargetEnabled",
   "dailyLimits",
   "dailyLimitPolicies",
   "dailyLimitCooldowns",
@@ -71,6 +73,7 @@ browser.storage.local.get([
   "dailyLockEnd"
 ]).then((result) => {
   enabledToggle.checked = result.enabled !== false;
+  movingTargetToggle.checked = result.movingTargetEnabled === true;
 
   delayMinutes = normalizeDelayMinutes(result.delayMinutes || 1);
   resetHours = normalizeResetHours(result.resetHours || 24);
@@ -186,6 +189,10 @@ resetInput.addEventListener("change", () => {
   resetHours = val;
   resetInput.value = resetHours;
   browser.storage.local.set({ resetHours: resetHours });
+});
+
+movingTargetToggle.addEventListener("change", () => {
+  browser.storage.local.set({ movingTargetEnabled: movingTargetToggle.checked });
 });
 
 // --- Cooldown ---
@@ -704,6 +711,10 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     resetInput.value = resetHours;
   }
 
+  if (changes.movingTargetEnabled) {
+    movingTargetToggle.checked = changes.movingTargetEnabled.newValue === true;
+  }
+
   if (changes.cooldownUntil) {
     cooldownUntil = normalizeCooldownUntil(changes.cooldownUntil.newValue);
     renderCooldown();
@@ -918,6 +929,7 @@ function setControlsLocked(locked) {
   enabledToggle.disabled = locked;
   delayInput.disabled = locked;
   resetInput.disabled = locked;
+  movingTargetToggle.disabled = locked;
   cooldownBtn.disabled = locked || (!isCooldownActive() && sites.length === 0);
   dailyLockToggle.disabled = locked;
   dailyLockStartInput.disabled = locked;
