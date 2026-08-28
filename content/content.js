@@ -111,6 +111,13 @@
   // --- Create Overlay ---
 
   function createOverlay() {
+    // Extension reloads or duplicate content-script injection can leave a host
+    // owned by an invalidated script context. Keep the DOM overlay a singleton
+    // so a stale, non-interactive layer cannot remain underneath the new one.
+    document.querySelectorAll("airlock-overlay").forEach((existingOverlay) => {
+      existingOverlay.remove();
+    });
+
     const host = document.createElement("airlock-overlay");
     host.style.cssText = "all: initial !important; position: fixed !important; top: 0 !important; left: 0 !important; width: 100vw !important; height: 100vh !important; z-index: 2147483647 !important; pointer-events: auto !important;";
     shadowRoot = host.attachShadow({ mode: "closed" });
