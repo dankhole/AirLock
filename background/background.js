@@ -6,7 +6,6 @@ const DEFAULT_CONFIG = {
   enabled: true,
   sites: [],
   delayMinutes: 1,
-  resetHours: 24,
   movingTargetEnabled: false,
   dailyLimits: {},
   dailyLimitPolicies: {},
@@ -18,7 +17,7 @@ const DEFAULT_CONFIG = {
 
 const PENDING_CONFIG_CHANGE_KEY = "pendingConfigChange";
 const PENDING_CONFIG_CHANGE_ALARM = "airlock.pendingConfigChange";
-const SESSION_RESET_ALARM = "airlock.sessionReset";
+const MIDNIGHT_RESET_ALARM = "airlock.sessionReset";
 const DAILY_LOCK_BOUNDARY_ALARM = "airlock.dailyLockBoundary";
 const COOLDOWN_BOUNDARY_ALARM = "airlock.cooldownBoundary";
 const MINUTE_MS = 60 * 1000;
@@ -32,6 +31,7 @@ const MAX_USAGE_UPDATE_MS = 5 * 1000;
 
 browser.runtime.onInstalled.addListener(async () => {
   await migrateStoredConfig();
+  await resetDailyStateIfNeeded();
   await reconcilePendingConfigChange();
   await reconcileExpiredSessions();
   await scheduleDailyLockBoundaryAlarm();
@@ -53,6 +53,7 @@ function getSessionKey(tabId) {
 async function reconcileStartupState() {
   try {
     await migrateStoredConfig();
+    await resetDailyStateIfNeeded();
     await reconcilePendingConfigChange();
     await reconcileExpiredSessions();
     await scheduleDailyLockBoundaryAlarm();
@@ -75,6 +76,7 @@ async function migrateStoredConfig() {
     "dailyLimits",
     "dailyLimitPolicies",
     "dailyLimitCooldowns",
+    "dailyLimitUsageOffsets",
     "dailyUsage",
     "guardMinutes",
     "cooldownUntil",
@@ -93,13 +95,6 @@ async function migrateStoredConfig() {
     : clampDelayMinutes(existing.guardMinutes);
   const unifiedWaitMinutes = Math.max(delayMinutes, legacyGuardMinutes);
   if (existing.delayMinutes !== unifiedWaitMinutes) updates.delayMinutes = unifiedWaitMinutes;
-
-  if (existing.resetHours === undefined) {
-    updates.resetHours = DEFAULT_CONFIG.resetHours;
-  } else {
-    const resetHours = clampResetHours(existing.resetHours);
-    if (resetHours !== existing.resetHours) updates.resetHours = resetHours;
-  }
 
   if (typeof existing.movingTargetEnabled !== "boolean") {
     updates.movingTargetEnabled = DEFAULT_CONFIG.movingTargetEnabled;
@@ -128,6 +123,9 @@ async function migrateStoredConfig() {
 
   if (!existing.dailyUsage || typeof existing.dailyUsage !== "object") {
     updates.dailyUsage = createEmptyDailyUsage();
+  }
+  if (!existing.dailyLimitUsageOffsets || typeof existing.dailyLimitUsageOffsets !== "object") {
+    updates.dailyLimitUsageOffsets = createEmptyDailyUsage();
   }
 
   const cooldownUntil = normalizeCooldownUntil(existing.cooldownUntil);
@@ -166,6 +164,9 @@ async function migrateStoredConfig() {
   if (existing.requireHoverTarget !== undefined || existing.guardMinutes !== undefined) {
     await browser.storage.local.remove(["requireHoverTarget", "guardMinutes"]);
   }
+  if (existing.resetHours !== undefined) {
+    await browser.storage.local.remove("resetHours");
+  }
 }
 
 async function readConfig() {
@@ -173,7 +174,6 @@ async function readConfig() {
     "enabled",
     "sites",
     "delayMinutes",
-    "resetHours",
     "movingTargetEnabled",
     "dailyLimits",
     "dailyLimitPolicies",
@@ -186,7 +186,6 @@ async function readConfig() {
     enabled: result.enabled !== false,
     sites: result.sites || [],
     delayMinutes: clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes),
-    resetHours: clampResetHours(result.resetHours || DEFAULT_CONFIG.resetHours),
     movingTargetEnabled: result.movingTargetEnabled === true,
     dailyLimits: normalizeDailyLimits(result.dailyLimits, result.sites || []),
     dailyLimitPolicies: normalizeDailyLimitPolicies(
@@ -226,13 +225,6 @@ function clampDelayMinutes(value) {
   if (isNaN(minutes) || minutes < 1) minutes = 1;
   if (minutes > 600) minutes = 600;
   return minutes;
-}
-
-function clampResetHours(value) {
-  let hours = parseInt(value, 10);
-  if (isNaN(hours) || hours < 1) hours = 1;
-  if (hours > 8760) hours = 8760;
-  return hours;
 }
 
 function normalizeCooldownUntil(value, now = Date.now()) {
@@ -345,8 +337,34 @@ function getNextLocalMidnight(now = Date.now()) {
   return date.getTime();
 }
 
+function getCurrentLocalMidnight(now = Date.now()) {
+  const date = new Date(now);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
 function createEmptyDailyUsage(now = Date.now()) {
   return { date: getLocalDateKey(now), sites: {} };
+}
+
+async function resetDailyStateIfNeeded(now = Date.now()) {
+  const today = getLocalDateKey(now);
+  const stored = await browser.storage.local.get([
+    "dailyUsage",
+    "dailyLimitUsageOffsets"
+  ]);
+  const usageIsCurrent = stored.dailyUsage && stored.dailyUsage.date === today;
+  const offsetsAreCurrent =
+    stored.dailyLimitUsageOffsets && stored.dailyLimitUsageOffsets.date === today;
+
+  if (usageIsCurrent && offsetsAreCurrent) return false;
+
+  await browser.storage.local.set({
+    dailyUsage: createEmptyDailyUsage(now),
+    dailyLimitUsageOffsets: createEmptyDailyUsage(now),
+    dailyLimitCooldowns: {}
+  });
+  return true;
 }
 
 async function readDailyUsage(now = Date.now()) {
@@ -367,14 +385,32 @@ async function readDailyUsage(now = Date.now()) {
   };
 }
 
-async function getDailyLimitState(config, hostname, now = Date.now()) {
+async function readDailyLimitUsageOffsets(now = Date.now()) {
+  const result = await browser.storage.local.get("dailyLimitUsageOffsets");
+  const stored = result.dailyLimitUsageOffsets;
+  const today = getLocalDateKey(now);
+
+  if (!stored || stored.date !== today || !stored.sites || typeof stored.sites !== "object") {
+    return createEmptyDailyUsage(now);
+  }
+
+  return {
+    date: today,
+    sites: Object.fromEntries(
+      Object.entries(stored.sites)
+        .map(([site, usedMs]) => [site, Math.max(0, Number(usedMs) || 0)])
+    )
+  };
+}
+
+async function getDailyLimitState(config, hostname, now = Date.now(), allowCooldownStart = true) {
   const site = getTrackedSite(hostname, config.sites);
   const limitMinutes = site ? clampDailyLimitMinutes(config.dailyLimits[site]) : null;
   const policy = site
     ? normalizeDailyLimitPolicy(config.dailyLimitPolicies[site])
     : normalizeDailyLimitPolicy(null);
 
-  if (!site || limitMinutes === null) {
+  if (!site) {
     return {
       site: site,
       limitMinutes: null,
@@ -387,14 +423,28 @@ async function getDailyLimitState(config, hostname, now = Date.now()) {
   }
 
   const usage = await readDailyUsage(now);
+  if (limitMinutes === null) {
+    return {
+      site: site,
+      limitMinutes: null,
+      limitMode: policy.mode,
+      usedMs: usage.sites[site] || 0,
+      remainingMs: null,
+      reached: false,
+      resetAt: getNextLocalMidnight(now)
+    };
+  }
+
   const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
+  const usageOffsets = await readDailyLimitUsageOffsets(now);
   const rawCooldowns = storedCooldowns.dailyLimitCooldowns;
   const cooldowns = rawCooldowns && typeof rawCooldowns === "object" && !Array.isArray(rawCooldowns)
     ? { ...rawCooldowns }
     : {};
   const cooldownUntil = Number(cooldowns[site]);
   const limitMs = limitMinutes * MINUTE_MS;
-  let usedMs = usage.sites[site] || 0;
+  const totalUsedMs = usage.sites[site] || 0;
+  let usedMs = Math.max(0, totalUsedMs - (usageOffsets.sites[site] || 0));
 
   if (Number.isFinite(cooldownUntil) && cooldownUntil > now) {
     if (policy.mode === "cooldown" && usedMs >= limitMs) {
@@ -413,15 +463,15 @@ async function getDailyLimitState(config, hostname, now = Date.now()) {
     await browser.storage.local.set({ dailyLimitCooldowns: cooldowns });
   } else if (Number.isFinite(cooldownUntil)) {
     delete cooldowns[site];
-    delete usage.sites[site];
+    usageOffsets.sites[site] = totalUsedMs;
     usedMs = 0;
     await browser.storage.local.set({
       dailyLimitCooldowns: cooldowns,
-      dailyUsage: usage
+      dailyLimitUsageOffsets: usageOffsets
     });
   }
 
-  if (usedMs >= limitMs && policy.mode === "cooldown") {
+  if (usedMs >= limitMs && policy.mode === "cooldown" && allowCooldownStart) {
     const nextCooldownUntil = now + policy.cooldownMinutes * MINUTE_MS;
     cooldowns[site] = nextCooldownUntil;
     await browser.storage.local.set({ dailyLimitCooldowns: cooldowns });
@@ -477,13 +527,13 @@ async function getSession(tabId) {
 async function setSession(tabId, session) {
   const key = getSessionKey(tabId);
   await browser.storage.session.set({ [key]: session });
-  await scheduleSessionResetAlarm();
+  await scheduleMidnightResetAlarm();
 }
 
 async function removeSession(tabId) {
   const key = getSessionKey(tabId);
   await browser.storage.session.remove(key);
-  await scheduleSessionResetAlarm();
+  await scheduleMidnightResetAlarm();
 }
 
 async function isTabActiveAndFocused(tabId) {
@@ -529,42 +579,29 @@ async function getAllSessions() {
     .filter((entry) => entry.tabId !== null && entry.session && entry.session.domain);
 }
 
-function createTimerSession(domain, delayMinutes, resetHours, now = Date.now()) {
+function createTimerSession(domain, delayMinutes, now = Date.now()) {
   const remainingMs = delayMinutes * MINUTE_MS;
   return {
     domain: domain,
     createdAt: now,
-    expiresAt: now + resetHours * HOUR_MS,
+    expiresAt: getNextLocalMidnight(now),
     remainingMs: remainingMs
   };
 }
 
-function getSessionExpiresAt(session, resetHours) {
-  return (session.createdAt || Date.now()) + resetHours * HOUR_MS;
+function getSessionExpiresAt(session) {
+  return getNextLocalMidnight(session.createdAt || Date.now());
 }
 
-function isSessionExpired(session, resetHours, now = Date.now()) {
-  return getSessionExpiresAt(session, resetHours) <= now;
+function isSessionExpired(session, now = Date.now()) {
+  return getSessionExpiresAt(session) <= now;
 }
 
-async function scheduleSessionResetAlarm() {
+async function scheduleMidnightResetAlarm() {
   if (!browser.alarms) return;
 
-  const config = await readConfig();
-  const sessions = await getAllSessions();
-  const nextExpiresAt = sessions
-    .filter((entry) => config.enabled && isDomainTracked(entry.session.domain, config.sites))
-    .map((entry) => getSessionExpiresAt(entry.session, config.resetHours))
-    .filter((expiresAt) => typeof expiresAt === "number" && expiresAt > Date.now())
-    .sort((a, b) => a - b)[0];
-
-  if (!nextExpiresAt) {
-    await browser.alarms.clear(SESSION_RESET_ALARM);
-    return;
-  }
-
-  await browser.alarms.create(SESSION_RESET_ALARM, {
-    when: nextExpiresAt
+  await browser.alarms.create(MIDNIGHT_RESET_ALARM, {
+    when: getNextLocalMidnight()
   });
 }
 
@@ -705,11 +742,6 @@ function describePendingConfigChange(pending) {
     return "Reducing wait to " + pending.delayMinutes + " " + unit;
   }
 
-  if (pending.type === "increaseResetHours") {
-    const unit = pending.resetHours === 1 ? "hour" : "hours";
-    return "Increasing reset window to " + pending.resetHours + " " + unit;
-  }
-
   if (pending.type === "changeDailyLimit") {
     if (pending.dailyLimitMinutes === null) {
       return "Removing daily limit for " + pending.site;
@@ -802,21 +834,6 @@ async function startPendingConfigChange(change) {
       type: "reduceDelay",
       remainingMs: waitMinutes * MINUTE_MS,
       delayMinutes: delayMinutes
-    };
-  } else if (change.type === "increaseResetHours") {
-    const resetHours = clampResetHours(change.resetHours || DEFAULT_CONFIG.resetHours);
-
-    if (resetHours <= config.resetHours) {
-      await browser.storage.local.set({ resetHours: resetHours });
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "increaseResetHours",
-      remainingMs: waitMinutes * MINUTE_MS,
-      resetHours: resetHours,
-      previousResetHours: config.resetHours
     };
   } else if (change.type === "changeDailyLimit") {
     const site = String(change.site || "").trim().toLowerCase();
@@ -979,6 +996,12 @@ async function reconcilePendingConfigChange() {
     return null;
   }
 
+  if (pending.type === "increaseResetHours") {
+    await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
+    await schedulePendingConfigChange(null);
+    return null;
+  }
+
   if (pending.type === "endCooldown") {
     const stored = await browser.storage.local.get("cooldownUntil");
     const activeCooldownUntil = normalizeCooldownUntil(stored.cooldownUntil);
@@ -1054,25 +1077,23 @@ async function applyPendingConfigChange(pending) {
     const nextDailyLimits = { ...config.dailyLimits };
     const nextPolicies = { ...config.dailyLimitPolicies };
     const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
+    const usageOffsets = await readDailyLimitUsageOffsets();
     const nextCooldowns = { ...(storedCooldowns.dailyLimitCooldowns || {}) };
     delete nextDailyLimits[pending.site];
     delete nextPolicies[pending.site];
     delete nextCooldowns[pending.site];
+    delete usageOffsets.sites[pending.site];
     await browser.storage.local.set({
       sites: nextSites,
       dailyLimits: nextDailyLimits,
       dailyLimitPolicies: nextPolicies,
-      dailyLimitCooldowns: nextCooldowns
+      dailyLimitCooldowns: nextCooldowns,
+      dailyLimitUsageOffsets: usageOffsets
     });
   } else if (pending.type === "reduceDelay") {
     const delayMinutes = clampDelayMinutes(pending.delayMinutes || DEFAULT_CONFIG.delayMinutes);
     if (delayMinutes < config.delayMinutes && config.delayMinutes <= pending.waitMinutes) {
       await browser.storage.local.set({ delayMinutes: delayMinutes });
-    }
-  } else if (pending.type === "increaseResetHours") {
-    const resetHours = clampResetHours(pending.resetHours || DEFAULT_CONFIG.resetHours);
-    if (config.resetHours === pending.previousResetHours && resetHours > config.resetHours) {
-      await browser.storage.local.set({ resetHours: resetHours });
     }
   } else if (pending.type === "changeDailyLimit" && config.sites.includes(pending.site)) {
     const nextDailyLimits = { ...config.dailyLimits };
@@ -1085,11 +1106,14 @@ async function applyPendingConfigChange(pending) {
     if (pending.dailyLimitMinutes === null) {
       const nextPolicies = { ...config.dailyLimitPolicies };
       const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
+      const usageOffsets = await readDailyLimitUsageOffsets();
       const nextCooldowns = { ...(storedCooldowns.dailyLimitCooldowns || {}) };
       delete nextPolicies[pending.site];
       delete nextCooldowns[pending.site];
+      delete usageOffsets.sites[pending.site];
       updates.dailyLimitPolicies = nextPolicies;
       updates.dailyLimitCooldowns = nextCooldowns;
+      updates.dailyLimitUsageOffsets = usageOffsets;
     }
     await browser.storage.local.set(updates);
   } else if (pending.type === "changeDailyLimitPolicy" && config.sites.includes(pending.site)) {
@@ -1122,7 +1146,7 @@ async function applyPendingConfigChange(pending) {
 
   await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
   await schedulePendingConfigChange(null);
-  await scheduleSessionResetAlarm();
+  await scheduleMidnightResetAlarm();
   await scheduleDailyLockBoundaryAlarm();
   await scheduleCooldownBoundaryAlarm();
   await broadcastConfigRecheck();
@@ -1138,23 +1162,23 @@ async function reconcileExpiredSessions() {
   for (const { key, tabId, session } of sessions) {
     let currentSession = session;
 
-    if (!currentSession.createdAt || !currentSession.expiresAt) {
-      const createdAt = currentSession.createdAt || now;
+    const createdAt = currentSession.createdAt || now;
+    const expiresAt = getNextLocalMidnight(createdAt);
+    if (currentSession.createdAt !== createdAt || currentSession.expiresAt !== expiresAt) {
       currentSession = {
         ...currentSession,
         createdAt: createdAt,
-        expiresAt: createdAt + config.resetHours * HOUR_MS
+        expiresAt: expiresAt
       };
       await browser.storage.session.set({ [key]: currentSession });
     }
 
-    if (!isSessionExpired(currentSession, config.resetHours, now)) continue;
+    if (!isSessionExpired(currentSession, now)) continue;
     if (!config.enabled || !isDomainTracked(currentSession.domain, config.sites)) continue;
 
     const nextSession = createTimerSession(
       currentSession.domain,
       config.delayMinutes,
-      config.resetHours,
       now
     );
     await browser.storage.session.set({ [key]: nextSession });
@@ -1190,8 +1214,14 @@ async function reconcileExpiredSessions() {
     }
   }
 
-  await scheduleSessionResetAlarm();
+  await scheduleMidnightResetAlarm();
   await updateBadge();
+}
+
+async function reconcileMidnightReset() {
+  await resetDailyStateIfNeeded();
+  await reconcileExpiredSessions();
+  await broadcastConfigRecheck();
 }
 
 if (browser.alarms) {
@@ -1200,9 +1230,9 @@ if (browser.alarms) {
       reconcilePendingConfigChange().catch((error) => {
         console.warn("[Airlock] Failed to apply pending config change:", error);
       });
-    } else if (alarm.name === SESSION_RESET_ALARM) {
-      reconcileExpiredSessions().catch((error) => {
-        console.warn("[Airlock] Failed to reset expired sessions:", error);
+    } else if (alarm.name === MIDNIGHT_RESET_ALARM) {
+      reconcileMidnightReset().catch((error) => {
+        console.warn("[Airlock] Failed to apply midnight reset:", error);
       });
     } else if (alarm.name === DAILY_LOCK_BOUNDARY_ALARM) {
       reconcileDailyLockBoundary().catch((error) => {
@@ -1219,7 +1249,7 @@ if (browser.alarms) {
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
 
-  if (changes.enabled || changes.sites || changes.delayMinutes || changes.resetHours) {
+  if (changes.enabled || changes.sites || changes.delayMinutes) {
     reconcileExpiredSessions().catch((error) => {
       console.warn("[Airlock] Failed to reconcile expired sessions:", error);
     });
@@ -1427,20 +1457,21 @@ async function handleContentReady(tabId, domain) {
   const now = Date.now();
 
   if (session && session.domain === domain) {
-    if (!session.createdAt || !session.expiresAt) {
-      const createdAt = session.createdAt || now;
+    const createdAt = session.createdAt || now;
+    const expiresAt = getNextLocalMidnight(createdAt);
+    if (session.createdAt !== createdAt || session.expiresAt !== expiresAt) {
       session = {
         ...session,
         createdAt: createdAt,
-        expiresAt: createdAt + config.resetHours * HOUR_MS
+        expiresAt: expiresAt
       };
       await setSession(tabId, session);
     }
 
-    const resetAt = getSessionExpiresAt(session, config.resetHours);
+    const resetAt = getSessionExpiresAt(session);
 
-    if (isSessionExpired(session, config.resetHours, now)) {
-      const nextSession = createTimerSession(domain, config.delayMinutes, config.resetHours, now);
+    if (isSessionExpired(session, now)) {
+      const nextSession = createTimerSession(domain, config.delayMinutes, now);
       await setSession(tabId, nextSession);
       return addDailyLimitMetadata({
         type: "SHOW_OVERLAY",
@@ -1472,7 +1503,7 @@ async function handleContentReady(tabId, domain) {
     }, dailyLimitState);
   }
 
-  const nextSession = createTimerSession(domain, config.delayMinutes, config.resetHours, now);
+  const nextSession = createTimerSession(domain, config.delayMinutes, now);
   await setSession(tabId, nextSession);
   return addDailyLimitMetadata({
     type: "SHOW_OVERLAY",
@@ -1484,47 +1515,38 @@ async function handleContentReady(tabId, domain) {
 
 async function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
   const config = await getConfig();
-  const elapsed = Math.max(0, Math.min(Number(elapsedMs) || 0, MAX_USAGE_UPDATE_MS));
+  const now = Date.now();
+  const requestedElapsed = Math.max(
+    0,
+    Math.min(Number(elapsedMs) || 0, MAX_USAGE_UPDATE_MS)
+  );
+  const elapsed = Math.min(requestedElapsed, Math.max(0, now - getCurrentLocalMidnight(now)));
   const active = await isTabActiveAndFocused(tabId);
 
-  if (!config.enabled || !active || elapsed <= 0 || !isDomainTracked(domain, config.sites)) {
+  if (!active || elapsed <= 0 || !isDomainTracked(domain, config.sites)) {
     return { ok: false, reached: false };
   }
 
-  const dailyLockState = getDailyLockState(config);
+  const dailyLockState = getDailyLockState(config, now);
   if (dailyLockState.locked) {
     return { ok: false, reached: false };
   }
 
-  const now = Date.now();
-  const state = await getDailyLimitState(config, domain, now);
-  if (state.limitMinutes === null || state.reached) {
-    return {
-      ok: true,
-      reached: state.reached,
-      resetAt: state.resetAt,
-      limitMinutes: state.limitMinutes,
-      dailyLimitMode: state.limitMode,
-      remainingMs: state.remainingMs
-    };
-  }
-
   const usage = await readDailyUsage(now);
-  const limitMs = state.limitMinutes * MINUTE_MS;
-  const usedMs = Math.min(limitMs, state.usedMs + elapsed);
-  usage.sites[state.site] = usedMs;
+  const site = getTrackedSite(domain, config.sites);
+  usage.sites[site] = (usage.sites[site] || 0) + elapsed;
   await browser.storage.local.set({ dailyUsage: usage });
 
-  const reached = usedMs >= limitMs;
+  const state = await getDailyLimitState(config, domain, now, config.enabled);
+  const reached = config.enabled && state.reached;
   if (reached) {
-    const reachedState = await getDailyLimitState(config, domain, now);
     await broadcastConfigRecheck();
     return {
       ok: true,
       reached: true,
-      resetAt: reachedState.resetAt,
-      limitMinutes: reachedState.limitMinutes,
-      dailyLimitMode: reachedState.limitMode,
+      resetAt: state.resetAt,
+      limitMinutes: state.limitMinutes,
+      dailyLimitMode: state.limitMode,
       remainingMs: 0
     };
   }
@@ -1535,7 +1557,7 @@ async function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
     resetAt: state.resetAt,
     limitMinutes: state.limitMinutes,
     dailyLimitMode: state.limitMode,
-    remainingMs: Math.max(0, limitMs - usedMs)
+    remainingMs: state.remainingMs
   };
 }
 

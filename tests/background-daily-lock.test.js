@@ -154,7 +154,6 @@ function baseConfig(overrides = {}) {
     enabled: true,
     sites: ["example.com"],
     delayMinutes: 1,
-    resetHours: 24,
     dailyLimits: {},
     dailyLimitPolicies: {},
     dailyLimitCooldowns: {},
@@ -266,6 +265,85 @@ test("daily usage from a previous local day does not block the site", async () =
   assert.equal(response.dailyUsageRemainingMs, 60 * 1000);
 });
 
+test("daily usage is recorded without a limit even when Airlock is off", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({ enabled: false })
+  );
+
+  const response = await context.handleDailyUsageUpdate(7, "news.example.com", 1500);
+
+  assert.equal(response.ok, true);
+  assert.equal(response.reached, false);
+  assert.equal(response.limitMinutes, null);
+  assert.equal(response.remainingMs, null);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 1500);
+});
+
+test("daily totals continue past a configured limit while Airlock is off", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({
+      enabled: false,
+      dailyLimits: { "example.com": 1 },
+      dailyUsage: {
+        date: localDateKey(),
+        sites: { "example.com": 59 * 1000 }
+      }
+    })
+  );
+
+  const response = await context.handleDailyUsageUpdate(7, "example.com", 2000);
+
+  assert.equal(response.reached, false);
+  assert.equal(response.remainingMs, 0);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 61 * 1000);
+});
+
+test("wait sessions always expire at the next local midnight", async () => {
+  const { context } = await loadBackground(baseConfig());
+  const createdAt = new Date(2026, 7, 31, 10, 15, 0, 0).getTime();
+  const expectedMidnight = new Date(2026, 8, 1, 0, 0, 0, 0).getTime();
+  const session = context.createTimerSession("example.com", 1, createdAt);
+
+  assert.equal(session.expiresAt, expectedMidnight);
+  assert.equal(context.getSessionExpiresAt(session), expectedMidnight);
+  assert.equal(context.isSessionExpired(session, expectedMidnight - 1), false);
+  assert.equal(context.isSessionExpired(session, expectedMidnight), true);
+});
+
+test("midnight resets daily state even when there are no open sessions", async () => {
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(12, 0, 0, 0);
+  const tomorrowMs = tomorrow.getTime();
+  const { context, state } = await loadBackground(
+    baseConfig({
+      dailyUsage: {
+        date: localDateKey(),
+        sites: { "example.com": 45 * 60 * 1000 }
+      },
+      dailyLimitUsageOffsets: {
+        date: localDateKey(),
+        sites: { "example.com": 15 * 60 * 1000 }
+      },
+      dailyLimitCooldowns: {
+        "example.com": tomorrowMs + 60 * 60 * 1000
+      }
+    })
+  );
+
+  assert.equal(state.sessionData.session_7, undefined);
+  assert.ok(state.alarms.has("airlock.sessionReset"));
+
+  const reset = await context.resetDailyStateIfNeeded(tomorrowMs);
+
+  assert.equal(reset, true);
+  assert.equal(state.localData.dailyUsage.date, localDateKey(tomorrow));
+  assert.equal(Object.keys(state.localData.dailyUsage.sites).length, 0);
+  assert.equal(state.localData.dailyLimitUsageOffsets.date, localDateKey(tomorrow));
+  assert.equal(Object.keys(state.localData.dailyLimitUsageOffsets.sites).length, 0);
+  assert.equal(Object.keys(state.localData.dailyLimitCooldowns).length, 0);
+});
+
 test("a per-site cooldown starts at the limit and resets usage when it expires", async () => {
   const { context, state } = await loadBackground(
     baseConfig({
@@ -302,8 +380,12 @@ test("a per-site cooldown starts at the limit and resets usage when it expires",
   );
   assert.equal(expiredState.reached, false);
   assert.equal(expiredState.remainingMs, 60 * 1000);
-  assert.equal(state.localData.dailyUsage.sites["example.com"], undefined);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 60 * 1000);
+  assert.equal(state.localData.dailyLimitUsageOffsets.sites["example.com"], 60 * 1000);
   assert.equal(state.localData.dailyLimitCooldowns["example.com"], undefined);
+
+  await context.handleDailyUsageUpdate(7, "example.com", 1000);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 61 * 1000);
 });
 
 test("switching from a hard block to cooldown requires the hover wait", async () => {
@@ -530,29 +612,27 @@ test("site removal, wait reduction, daily-limit removal, and daily-lock disablin
 
 test("the site wait is also the hold duration for weaker settings", async () => {
   const { context, state } = await loadBackground(
-    baseConfig({ delayMinutes: 3, resetHours: 24 })
+    baseConfig({ delayMinutes: 3 })
   );
 
   const disable = await context.startPendingConfigChange({ type: "disableAirlock" });
   assert.equal(disable.pending.remainingMs, 3 * 60 * 1000);
   assert.equal(state.localData.enabled, true);
-
-  await context.cancelPendingConfigChange();
-  const reset = await context.startPendingConfigChange({
-    type: "increaseResetHours",
-    resetHours: 48
-  });
-  assert.equal(reset.pending.remainingMs, 3 * 60 * 1000);
-  assert.equal(state.localData.resetHours, 24);
 });
 
-test("legacy wait and unlock hold settings migrate to one stricter wait", async () => {
+test("legacy settings migrate to one stricter wait and remove reset hours", async () => {
   const { state } = await loadBackground(
-    baseConfig({ delayMinutes: 2, guardMinutes: 5, requireHoverTarget: false })
+    baseConfig({
+      delayMinutes: 2,
+      guardMinutes: 5,
+      requireHoverTarget: false,
+      resetHours: 48
+    })
   );
 
   assert.equal(state.localData.delayMinutes, 5);
   assert.equal(state.localData.movingTargetEnabled, false);
   assert.equal(state.localData.guardMinutes, undefined);
   assert.equal(state.localData.requireHoverTarget, undefined);
+  assert.equal(state.localData.resetHours, undefined);
 });

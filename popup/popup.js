@@ -3,7 +3,6 @@
 const dailyLockApi = globalThis.AirlockDailyLock;
 const enabledToggle = document.getElementById("enabled-toggle");
 const delayInput = document.getElementById("delay-input");
-const resetInput = document.getElementById("reset-input");
 const movingTargetToggle = document.getElementById("moving-target-toggle");
 const cooldownSection = document.querySelector(".cooldown-section");
 const cooldownStatus = document.getElementById("cooldown-status");
@@ -36,7 +35,6 @@ confirmDialog.addEventListener("click", (event) => {
 
 let sites = [];
 let delayMinutes = 1;
-let resetHours = 24;
 let dailyLimits = {};
 let dailyLimitPolicies = {};
 let dailyLimitCooldowns = {};
@@ -60,7 +58,6 @@ browser.storage.local.get([
   "enabled",
   "sites",
   "delayMinutes",
-  "resetHours",
   "movingTargetEnabled",
   "dailyLimits",
   "dailyLimitPolicies",
@@ -75,7 +72,6 @@ browser.storage.local.get([
   movingTargetToggle.checked = result.movingTargetEnabled === true;
 
   delayMinutes = normalizeDelayMinutes(result.delayMinutes || 1);
-  resetHours = normalizeResetHours(result.resetHours || 24);
   dailyLimits = normalizeDailyLimits(result.dailyLimits);
   dailyLimitPolicies = normalizeDailyLimitPolicies(result.dailyLimitPolicies);
   dailyLimitCooldowns = normalizeDailyLimitCooldowns(result.dailyLimitCooldowns);
@@ -91,7 +87,6 @@ browser.storage.local.get([
   );
   dailyLockEnabled = result.dailyLockEnabled === true && dailyLockStart !== dailyLockEnd;
   delayInput.value = delayMinutes;
-  resetInput.value = resetHours;
   dailyLockToggle.checked = dailyLockEnabled;
   dailyLockStartInput.value = dailyLockStart;
   dailyLockEndInput.value = dailyLockEnd;
@@ -193,42 +188,6 @@ delayInput.addEventListener("change", async () => {
     type: "reduceDelay",
     delayMinutes: val
   });
-});
-
-resetInput.addEventListener("change", async () => {
-  const val = normalizeResetHours(resetInput.value);
-
-  if (pendingConfigChange) {
-    resetInput.value = resetHours;
-    return;
-  }
-
-  if (val === resetHours) return;
-  resetInput.value = resetHours;
-
-  if (val > resetHours) {
-    if (!(await confirmInPopup({
-      title: "Increase reset window?",
-      message: "Completed waits will remain valid longer. The hover hold is required before this weaker setting applies.",
-      confirmLabel: "Continue"
-    }))) return;
-
-    startPendingConfigChange({
-      type: "increaseResetHours",
-      resetHours: val
-    });
-    return;
-  }
-
-  if (!(await confirmInPopup({
-    title: "Reduce reset window?",
-    message: "Sites will require a new wait sooner, after " + val + (val === 1 ? " hour." : " hours."),
-    confirmLabel: "Reduce"
-  }))) return;
-
-  resetHours = val;
-  resetInput.value = resetHours;
-  browser.storage.local.set({ resetHours: resetHours });
 });
 
 movingTargetToggle.addEventListener("change", async () => {
@@ -710,15 +669,34 @@ async function changeDailyLimit(site, input) {
 
 function formatSiteUsage(site) {
   const limit = dailyLimits[site];
-  if (!limit) return "No daily limit";
+  const used = formatUsageDuration(getTodayUsageMs(site));
+  if (!limit) return used + " used today · No daily limit";
 
   const cooldownUntil = Number(dailyLimitCooldowns[site]);
   if (Number.isFinite(cooldownUntil) && cooldownUntil > Date.now()) {
     return "Cooldown · " + formatTime(cooldownUntil - Date.now()) + " left";
   }
 
-  const usedMinutes = Math.min(limit, Math.floor(getTodayUsageMs(site) / 60000));
-  return usedMinutes + " of " + limit + " min used today";
+  return formatUsageDuration(getTodayUsageMs(site)) +
+    " of " + limit + " min used today";
+}
+
+function formatUsageDuration(usedMs) {
+  const totalSeconds = Math.max(0, Math.floor((Number(usedMs) || 0) / 1000));
+  if (totalSeconds === 0) return "0 min";
+  if (totalSeconds < 60) return totalSeconds + " sec";
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (totalMinutes < 60) {
+    return seconds === 0
+      ? totalMinutes + " min"
+      : totalMinutes + "m " + seconds + "s";
+  }
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? hours + "h" : hours + "h " + minutes + "m";
 }
 
 function updateSiteUsageLabels() {
@@ -809,11 +787,6 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     delayInput.value = delayMinutes;
   }
 
-  if (changes.resetHours) {
-    resetHours = normalizeResetHours(changes.resetHours.newValue || 24);
-    resetInput.value = resetHours;
-  }
-
   if (changes.movingTargetEnabled) {
     movingTargetToggle.checked = changes.movingTargetEnabled.newValue === true;
   }
@@ -898,13 +871,6 @@ function normalizeDelayMinutes(value) {
   if (isNaN(minutes) || minutes < 1) minutes = 1;
   if (minutes > 600) minutes = 600;
   return minutes;
-}
-
-function normalizeResetHours(value) {
-  let hours = parseInt(value, 10);
-  if (isNaN(hours) || hours < 1) hours = 1;
-  if (hours > 8760) hours = 8760;
-  return hours;
 }
 
 function normalizeDailyLimitMinutes(value) {
@@ -1040,7 +1006,6 @@ function formatTime(ms) {
 function setControlsLocked(locked) {
   enabledToggle.disabled = locked;
   delayInput.disabled = locked;
-  resetInput.disabled = locked;
   movingTargetToggle.disabled = locked;
   cooldownBtn.disabled = locked || (!isCooldownActive() && sites.length === 0);
   dailyLockToggle.disabled = locked;
@@ -1102,11 +1067,6 @@ function getPendingConfigTitle(pending) {
   if (pending.type === "reduceDelay") {
     const unit = pending.delayMinutes === 1 ? "minute" : "minutes";
     return "Reducing wait to " + pending.delayMinutes + " " + unit;
-  }
-
-  if (pending.type === "increaseResetHours") {
-    const unit = pending.resetHours === 1 ? "hour" : "hours";
-    return "Increasing reset window to " + pending.resetHours + " " + unit;
   }
 
   if (pending.type === "changeDailyLimit") {

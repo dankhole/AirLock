@@ -24,14 +24,6 @@
       </div>
     </section>
 
-    <section class="delay-section">
-      <label for="reset-input">Reset after</label>
-      <div class="delay-input-group">
-        <input type="number" id="reset-input" min="1" max="8760" value="24">
-        <span class="delay-unit">hours</span>
-      </div>
-    </section>
-
     <section class="motion-section" aria-labelledby="moving-target-title">
       <div>
         <h2 id="moving-target-title">Moving target</h2>
@@ -96,7 +88,7 @@
 
     <section class="sites-section">
       <h2>Tracked Sites</h2>
-      <p class="sites-help">Set a daily limit, then choose a hard block or cooldown</p>
+      <p class="sites-help">Usage resets at midnight · limits are optional</p>
       <button id="add-current-btn" class="add-current-btn" style="display: none"></button>
       <ul id="site-list" class="site-list"></ul>
       <form id="add-site-form" class="add-site-form">

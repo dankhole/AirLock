@@ -96,14 +96,17 @@ function createDocument() {
 function createContext(document, options = {}) {
   let timerId = 0;
   let animationFrameId = 0;
+  let now = options.now || Date.now();
   const animationFrames = new Map();
+  const intervals = new Map();
+  const sentMessages = [];
   const event = { addListener() {} };
   const browser = {
     storage: {
       local: {
         async get() {
           return {
-            enabled: true,
+            enabled: options.enabled !== false,
             sites: ["example.com"],
             movingTargetEnabled: options.movingTargetEnabled === true
           };
@@ -114,8 +117,9 @@ function createContext(document, options = {}) {
     runtime: {
       onMessage: event,
       async sendMessage(message) {
+        sentMessages.push(message);
         if (message.type === "CONTENT_READY") {
-          return {
+          return options.contentReadyResponse || {
             type: "SHOW_OVERLAY",
             remainingMs: 60_000,
             active: true,
@@ -154,11 +158,19 @@ function createContext(document, options = {}) {
       return timerId;
     },
     clearTimeout() {},
-    setInterval() {
+    setInterval(callback) {
       timerId += 1;
+      intervals.set(timerId, callback);
       return timerId;
     },
-    clearInterval() {}
+    clearInterval(id) {
+      intervals.delete(id);
+    },
+    Date: class extends Date {
+      static now() {
+        return now;
+      }
+    }
   });
 
   context.runAnimationFrames = (timestamp) => {
@@ -166,6 +178,13 @@ function createContext(document, options = {}) {
     animationFrames.clear();
     callbacks.forEach((callback) => callback(timestamp));
   };
+  context.advanceTime = (elapsedMs) => {
+    now += elapsedMs;
+  };
+  context.runIntervals = () => {
+    [...intervals.values()].forEach((callback) => callback());
+  };
+  context.sentMessages = sentMessages;
   return context;
 }
 
@@ -217,4 +236,27 @@ test("reduced motion keeps an enabled moving target stationary", async () => {
   const target = document.latestElements["hover-target"];
   assert.equal(target.classList.contains("moving"), false);
   assert.equal(target.style.transform, "");
+});
+
+test("usage tracking runs without a daily limit or enabled wait setting", async () => {
+  const document = createDocument();
+  const context = createContext(document, {
+    enabled: false,
+    contentReadyResponse: {
+      type: "NO_OVERLAY",
+      active: true
+    }
+  });
+
+  await vm.runInContext(contentSource, context);
+  context.advanceTime(1000);
+  context.runIntervals();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const usageMessage = context.sentMessages.find(
+    (message) => message.type === "DAILY_USAGE_UPDATE"
+  );
+  assert.ok(usageMessage);
+  assert.equal(usageMessage.domain, "example.com");
+  assert.equal(usageMessage.elapsedMs, 1000);
 });

@@ -17,7 +17,6 @@
     config = await browser.storage.local.get([
       "enabled",
       "sites",
-      "cooldownUntil",
       "movingTargetEnabled"
     ]);
   } catch (e) {
@@ -38,8 +37,7 @@
     dailyUsageResetAt: null
   };
 
-  const initialCooldownActive = Number(config.cooldownUntil) > Date.now();
-  if ((config.enabled !== false || initialCooldownActive) && initiallyTracked) {
+  if (initiallyTracked) {
     try {
       response = await browser.runtime.sendMessage({
         type: "CONTENT_READY",
@@ -96,6 +94,7 @@
   let dailyUsageInterval = null;
   let dailyUsageTickAt = null;
   let dailyUsageUpdateInFlight = false;
+  let dailyUsageTrackingEnabled = initiallyTracked;
   let activeStateRefreshInFlight = false;
   let configRecheckInFlight = false;
   let configRecheckPending = false;
@@ -992,7 +991,7 @@
 
   function startDailyUsageTracking() {
     stopDailyUsageTracking();
-    if (overlayMode !== null || dailyLimitMinutes === null) return;
+    if (!dailyUsageTrackingEnabled || overlayMode !== null) return;
 
     dailyUsageTickAt = Date.now();
     dailyUsageInterval = setInterval(reportDailyUsage, DAILY_USAGE_TICK_MS);
@@ -1012,8 +1011,9 @@
 
     if (
       overlayMode !== null ||
-      dailyLimitMinutes === null ||
-      !isPageActive()
+      document.visibilityState !== "visible" ||
+      document.hidden ||
+      !backgroundActive
     ) {
       dailyUsageTickAt = now;
       return;
@@ -1183,8 +1183,11 @@
       const stillTracked = nextSites.some(
         (site) => hostname === site || hostname.endsWith("." + site)
       );
+      dailyUsageTrackingEnabled = stillTracked;
       if (!stillTracked) {
         dismissOverlay({ notifyDone: false });
+      } else {
+        recheckConfig();
       }
     }
 

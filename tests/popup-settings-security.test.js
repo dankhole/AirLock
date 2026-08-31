@@ -154,7 +154,6 @@ function createDocument() {
   const tagById = {
     "enabled-toggle": "input",
     "delay-input": "input",
-    "reset-input": "input",
     "moving-target-toggle": "input",
     "cooldown-btn": "button",
     "daily-lock-toggle": "input",
@@ -172,7 +171,7 @@ function createDocument() {
     "confirm-dialog-submit": "button"
   };
   const ids = [
-    "enabled-toggle", "delay-input", "reset-input", "moving-target-toggle",
+    "enabled-toggle", "delay-input", "moving-target-toggle",
     "cooldown-status", "cooldown-btn", "daily-lock-toggle", "daily-lock-start",
     "daily-lock-end", "daily-lock-status", "site-list", "add-site-form",
     "site-input", "add-current-btn", "add-site-btn", "pending-config-section",
@@ -222,7 +221,6 @@ async function loadPopup(overrides = {}, options = {}) {
     enabled: true,
     sites: ["example.com"],
     delayMinutes: 2,
-    resetHours: 24,
     movingTargetEnabled: false,
     dailyLimits: {},
     dailyLimitPolicies: {},
@@ -341,13 +339,6 @@ test("security-increasing settings require confirmation and then apply without a
   assert.equal(delay.localData.delayMinutes, 5);
   assert.equal(lastPendingChange(delay), undefined);
 
-  const reset = await loadPopup({ resetHours: 24 });
-  await runConfirmedAction(reset, reset.elements["reset-input"], "change", () => {
-    reset.elements["reset-input"].value = "12";
-  });
-  assert.equal(reset.localData.resetHours, 12);
-  assert.equal(lastPendingChange(reset), undefined);
-
   const moving = await loadPopup({ movingTargetEnabled: false });
   await runConfirmedAction(moving, moving.elements["moving-target-toggle"], "change", () => {
     moving.elements["moving-target-toggle"].checked = true;
@@ -406,13 +397,6 @@ test("security-reducing settings require confirmation before starting the hover 
       event: "change",
       prepare(environment) { environment.elements[this.id].value = "2"; },
       type: "reduceDelay"
-    },
-    {
-      config: { resetHours: 24 },
-      id: "reset-input",
-      event: "change",
-      prepare(environment) { environment.elements[this.id].value = "48"; },
-      type: "increaseResetHours"
     },
     {
       config: { movingTargetEnabled: true },
