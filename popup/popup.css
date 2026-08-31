@@ -501,11 +501,6 @@ body {
   transition: border-color 0.15s;
 }
 
-.site-item.confirm-remove {
-  border-color: #e74c3c;
-  background: #fef5f5;
-}
-
 .site-info {
   min-width: 0;
   display: flex;
@@ -618,11 +613,6 @@ body {
 
 .site-remove:hover {
   color: #e74c3c;
-}
-
-.site-item.confirm-remove .site-remove {
-  color: white;
-  background: #e74c3c;
 }
 
 /* Add Site Form */

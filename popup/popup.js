@@ -46,7 +46,6 @@ let dailyLockEnabled = false;
 let dailyLockStart = dailyLockApi.DEFAULT_START;
 let dailyLockEnd = dailyLockApi.DEFAULT_END;
 let currentDomain = null;
-let pendingRemove = null;
 let pendingConfigChange = null;
 let pendingConfigTimerTimeout = null;
 let pendingConfigTickAt = null;
@@ -114,9 +113,15 @@ browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
   renderAddCurrentButton();
 });
 
-addCurrentBtn.addEventListener("click", () => {
+addCurrentBtn.addEventListener("click", async () => {
   if (pendingConfigChange) return;
   if (!currentDomain || sites.includes(currentDomain)) return;
+  if (!(await confirmInPopup({
+    title: "Track " + currentDomain + "?",
+    message: "Airlock will add its configured restrictions to this site.",
+    confirmLabel: "Track site"
+  }))) return;
+
   sites.push(currentDomain);
   sites.sort();
   browser.storage.local.set({ sites: sites });
@@ -125,19 +130,34 @@ addCurrentBtn.addEventListener("click", () => {
 
 // --- Toggle ---
 
-enabledToggle.addEventListener("change", () => {
+enabledToggle.addEventListener("change", async () => {
   if (pendingConfigChange) {
     enabledToggle.checked = !enabledToggle.checked;
     return;
   }
 
-  if (!enabledToggle.checked) {
-    enabledToggle.checked = true;
+  const nextEnabled = enabledToggle.checked;
+  enabledToggle.checked = !nextEnabled;
+
+  if (!nextEnabled) {
+    if (!(await confirmInPopup({
+      title: "Turn off Airlock?",
+      message: "Tracked sites will no longer require the configured wait.",
+      confirmLabel: "Continue"
+    }))) return;
+
     startPendingConfigChange({ type: "disableAirlock" });
     return;
   }
 
-  browser.storage.local.set({ enabled: enabledToggle.checked });
+  if (!(await confirmInPopup({
+    title: "Turn on Airlock?",
+    message: "Tracked sites will require the configured restrictions again.",
+    confirmLabel: "Turn on"
+  }))) return;
+
+  enabledToggle.checked = true;
+  browser.storage.local.set({ enabled: true });
 });
 
 // --- Delay ---
@@ -150,6 +170,7 @@ delayInput.addEventListener("change", async () => {
     return;
   }
 
+  delayInput.value = delayMinutes;
   if (val > delayMinutes && !(await confirmSettingIncrease("hover wait", delayMinutes, val, "minute"))) {
     delayInput.value = delayMinutes;
     return;
@@ -162,14 +183,19 @@ delayInput.addEventListener("change", async () => {
     return;
   }
 
-  delayInput.value = delayMinutes;
+  if (!(await confirmInPopup({
+    title: "Reduce hover wait?",
+    message: "Change from " + delayMinutes + " to " + val + " minutes. The hover hold is required before this weaker setting applies.",
+    confirmLabel: "Continue"
+  }))) return;
+
   startPendingConfigChange({
     type: "reduceDelay",
     delayMinutes: val
   });
 });
 
-resetInput.addEventListener("change", () => {
+resetInput.addEventListener("change", async () => {
   const val = normalizeResetHours(resetInput.value);
 
   if (pendingConfigChange) {
@@ -177,8 +203,16 @@ resetInput.addEventListener("change", () => {
     return;
   }
 
+  if (val === resetHours) return;
+  resetInput.value = resetHours;
+
   if (val > resetHours) {
-    resetInput.value = resetHours;
+    if (!(await confirmInPopup({
+      title: "Increase reset window?",
+      message: "Completed waits will remain valid longer. The hover hold is required before this weaker setting applies.",
+      confirmLabel: "Continue"
+    }))) return;
+
     startPendingConfigChange({
       type: "increaseResetHours",
       resetHours: val
@@ -186,13 +220,40 @@ resetInput.addEventListener("change", () => {
     return;
   }
 
+  if (!(await confirmInPopup({
+    title: "Reduce reset window?",
+    message: "Sites will require a new wait sooner, after " + val + (val === 1 ? " hour." : " hours."),
+    confirmLabel: "Reduce"
+  }))) return;
+
   resetHours = val;
   resetInput.value = resetHours;
   browser.storage.local.set({ resetHours: resetHours });
 });
 
-movingTargetToggle.addEventListener("change", () => {
-  browser.storage.local.set({ movingTargetEnabled: movingTargetToggle.checked });
+movingTargetToggle.addEventListener("change", async () => {
+  if (pendingConfigChange) {
+    movingTargetToggle.checked = !movingTargetToggle.checked;
+    return;
+  }
+
+  const nextEnabled = movingTargetToggle.checked;
+  movingTargetToggle.checked = !nextEnabled;
+  if (!(await confirmInPopup({
+    title: nextEnabled ? "Turn on moving target?" : "Turn off moving target?",
+    message: nextEnabled
+      ? "The hover circle will move during site-entry waits."
+      : "The hover circle will stay still. The hover hold is required before this weaker setting applies.",
+    confirmLabel: "Continue"
+  }))) return;
+
+  if (!nextEnabled) {
+    startPendingConfigChange({ type: "disableMovingTarget" });
+    return;
+  }
+
+  movingTargetToggle.checked = true;
+  browser.storage.local.set({ movingTargetEnabled: true });
 });
 
 // --- Cooldown ---
@@ -201,6 +262,12 @@ cooldownBtn.addEventListener("click", async () => {
   if (pendingConfigChange) return;
 
   if (isCooldownActive()) {
+    if (!(await confirmInPopup({
+      title: "End cooldown early?",
+      message: "Tracked sites will become available again. The hover hold is required before this weaker setting applies.",
+      confirmLabel: "Continue"
+    }))) return;
+
     startPendingConfigChange({
       type: "endCooldown",
       cooldownUntil: cooldownUntil
@@ -240,6 +307,12 @@ dailyLockToggle.addEventListener("change", async () => {
   const nextEnabled = dailyLockToggle.checked === true;
   if (!nextEnabled && dailyLockEnabled) {
     dailyLockToggle.checked = dailyLockEnabled;
+    if (!(await confirmInPopup({
+      title: "Turn off daily lock?",
+      message: "The scheduled lock window will stop blocking tracked sites. The hover hold is required before this weaker setting applies.",
+      confirmLabel: "Continue"
+    }))) return;
+
     startPendingConfigChange({ type: "disableDailyLock" });
     return;
   }
@@ -274,7 +347,7 @@ dailyLockToggle.addEventListener("change", async () => {
 dailyLockStartInput.addEventListener("change", saveDailyLockTimes);
 dailyLockEndInput.addEventListener("change", saveDailyLockTimes);
 
-function saveDailyLockTimes() {
+async function saveDailyLockTimes() {
   if (pendingConfigChange) {
     dailyLockStartInput.value = dailyLockStart;
     dailyLockEndInput.value = dailyLockEnd;
@@ -288,8 +361,22 @@ function saveDailyLockTimes() {
     dailyLockEnabled &&
     (schedule.start !== dailyLockStart || schedule.end !== dailyLockEnd)
   ) {
+    const direction = dailyLockApi.classifyScheduleChange(
+      dailyLockStart,
+      dailyLockEnd,
+      schedule.start,
+      schedule.end
+    );
     dailyLockStartInput.value = dailyLockStart;
     dailyLockEndInput.value = dailyLockEnd;
+    if (!(await confirmInPopup({
+      title: direction === "stronger" ? "Expand daily lock?" : "Change daily lock?",
+      message: direction === "stronger"
+        ? "The new schedule only adds locked time and will apply immediately."
+        : "The new schedule removes some currently locked time. The hover hold is required before it applies.",
+      confirmLabel: "Continue"
+    }))) return;
+
     startPendingConfigChange({
       type: "changeDailyLockSchedule",
       dailyLockStart: schedule.start,
@@ -417,7 +504,6 @@ function renderCooldown() {
 
 function renderSites() {
   siteList.innerHTML = "";
-  pendingRemove = null;
   sites.sort();
   sites.forEach((site) => {
     const li = document.createElement("li");
@@ -515,21 +601,20 @@ function renderSites() {
     btn.textContent = "\u00d7";
     btn.title = "Remove";
     btn.disabled = Boolean(pendingConfigChange);
-    btn.addEventListener("click", (e) => {
+    btn.addEventListener("click", async (e) => {
       e.stopPropagation();
       if (pendingConfigChange) return;
 
-      if (pendingRemove === site) {
-        startPendingConfigChange({
-          type: "removeSite",
-          site: site
-        });
-      } else {
-        clearPendingRemove();
-        pendingRemove = site;
-        li.classList.add("confirm-remove");
-        btn.textContent = "Remove?";
-      }
+      if (!(await confirmInPopup({
+        title: "Stop tracking " + site + "?",
+        message: "Airlock restrictions and daily-limit settings for this site will be removed. The hover hold is required before this weaker setting applies.",
+        confirmLabel: "Continue"
+      }))) return;
+
+      startPendingConfigChange({
+        type: "removeSite",
+        site: site
+      });
     });
 
     actions.appendChild(settings);
@@ -545,12 +630,24 @@ function renderSites() {
   renderCooldown();
 }
 
-function changeDailyLimitPolicy(site, nextValue) {
+async function changeDailyLimitPolicy(site, nextValue) {
   if (pendingConfigChange) return;
 
   const currentPolicy = normalizeDailyLimitPolicy(dailyLimitPolicies[site]);
   const nextPolicy = normalizeDailyLimitPolicy(nextValue);
   if (JSON.stringify(currentPolicy) === JSON.stringify(nextPolicy)) return;
+
+  const weaker = isDailyLimitPolicyWeaker(currentPolicy, nextPolicy);
+  if (!(await confirmInPopup({
+    title: weaker ? "Reduce daily-limit protection?" : "Increase daily-limit protection?",
+    message: weaker
+      ? "This policy allows access sooner after the daily limit. The hover hold is required before it applies."
+      : "This policy keeps the site blocked for longer and will apply immediately.",
+    confirmLabel: "Continue"
+  }))) {
+    renderSites();
+    return;
+  }
 
   startPendingConfigChange({
     type: "changeDailyLimitPolicy",
@@ -559,7 +656,7 @@ function changeDailyLimitPolicy(site, nextValue) {
   });
 }
 
-function changeDailyLimit(site, input) {
+async function changeDailyLimit(site, input) {
   if (pendingConfigChange) {
     input.value = dailyLimits[site] || "";
     return;
@@ -578,8 +675,16 @@ function changeDailyLimit(site, input) {
   if (nextLimit === currentLimit) return;
 
   const isMorePermissive = currentLimit !== null && (nextLimit === null || nextLimit > currentLimit);
+  input.value = currentLimit || "";
   if (isMorePermissive) {
-    input.value = currentLimit;
+    if (!(await confirmInPopup({
+      title: nextLimit === null ? "Remove daily limit?" : "Increase daily limit?",
+      message: nextLimit === null
+        ? "This site will no longer have a daily usage cap. The hover hold is required before it applies."
+        : "This site will allow more time each day. The hover hold is required before it applies.",
+      confirmLabel: "Continue"
+    }))) return;
+
     startPendingConfigChange({
       type: "changeDailyLimit",
       site: site,
@@ -587,6 +692,14 @@ function changeDailyLimit(site, input) {
     });
     return;
   }
+
+  if (!(await confirmInPopup({
+    title: currentLimit === null ? "Add daily limit?" : "Reduce daily limit?",
+    message: currentLimit === null
+      ? "This site will be capped at " + nextLimit + " minutes per day."
+      : "This site will allow less time each day: " + nextLimit + " minutes.",
+    confirmLabel: currentLimit === null ? "Add limit" : "Reduce"
+  }))) return;
 
   dailyLimits = { ...dailyLimits, [site]: nextLimit };
   if (nextLimit === null) delete dailyLimits[site];
@@ -614,15 +727,6 @@ function updateSiteUsageLabels() {
   });
 }
 
-function clearPendingRemove() {
-  if (pendingRemove === null) return;
-  pendingRemove = null;
-  siteList.querySelectorAll(".confirm-remove").forEach((el) => {
-    el.classList.remove("confirm-remove");
-    el.querySelector("button").textContent = "\u00d7";
-  });
-}
-
 function renderAddCurrentButton() {
   if (!currentDomain || sites.includes(currentDomain)) {
     addCurrentBtn.textContent = "";
@@ -635,13 +739,6 @@ function renderAddCurrentButton() {
   addCurrentBtn.disabled = Boolean(pendingConfigChange);
 }
 
-// Click anywhere else to cancel pending remove
-document.addEventListener("click", (e) => {
-  if (pendingRemove !== null && !e.target.closest(".site-item")) {
-    clearPendingRemove();
-  }
-});
-
 function cleanDomain(input) {
   let domain = input.trim().toLowerCase();
   domain = domain.replace(/^https?:\/\//, "");
@@ -651,7 +748,7 @@ function cleanDomain(input) {
   return domain;
 }
 
-addSiteForm.addEventListener("submit", (e) => {
+addSiteForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (pendingConfigChange) return;
 
@@ -661,6 +758,12 @@ addSiteForm.addEventListener("submit", (e) => {
     siteInput.value = "";
     return;
   }
+  if (!(await confirmInPopup({
+    title: "Track " + domain + "?",
+    message: "Airlock will add its configured restrictions to this site.",
+    confirmLabel: "Track site"
+  }))) return;
+
   sites.push(domain);
   browser.storage.local.set({ sites: sites });
   renderSites();
@@ -837,6 +940,15 @@ function normalizeDailyLimitPolicy(value) {
   };
 }
 
+function isDailyLimitPolicyWeaker(currentPolicy, nextPolicy) {
+  const current = normalizeDailyLimitPolicy(currentPolicy);
+  const next = normalizeDailyLimitPolicy(nextPolicy);
+
+  if (current.mode === "block") return next.mode === "cooldown";
+  if (next.mode === "block") return false;
+  return next.cooldownMinutes < current.cooldownMinutes;
+}
+
 function normalizeDailyLimitPolicies(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(
@@ -965,7 +1077,6 @@ function renderPendingConfigChange() {
     return;
   }
 
-  clearPendingRemove();
   pendingConfigSection.hidden = false;
   pendingConfigTitle.textContent = pendingConfigChange.description || getPendingConfigTitle(pendingConfigChange);
   setControlsLocked(true);
@@ -982,6 +1093,10 @@ function getPendingConfigTitle(pending) {
 
   if (pending.type === "disableAirlock") {
     return "Turning off Airlock";
+  }
+
+  if (pending.type === "disableMovingTarget") {
+    return "Turning off the moving target";
   }
 
   if (pending.type === "reduceDelay") {
@@ -1189,8 +1304,7 @@ function refreshPendingConfigChange() {
 }
 
 function startPendingConfigChange(change) {
-  clearPendingRemove();
-  browser.runtime
+  return browser.runtime
     .sendMessage({
       type: "START_PENDING_CONFIG_CHANGE",
       change: change

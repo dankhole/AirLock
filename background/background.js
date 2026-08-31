@@ -174,6 +174,7 @@ async function readConfig() {
     "sites",
     "delayMinutes",
     "resetHours",
+    "movingTargetEnabled",
     "dailyLimits",
     "dailyLimitPolicies",
     "cooldownUntil",
@@ -186,6 +187,7 @@ async function readConfig() {
     sites: result.sites || [],
     delayMinutes: clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes),
     resetHours: clampResetHours(result.resetHours || DEFAULT_CONFIG.resetHours),
+    movingTargetEnabled: result.movingTargetEnabled === true,
     dailyLimits: normalizeDailyLimits(result.dailyLimits, result.sites || []),
     dailyLimitPolicies: normalizeDailyLimitPolicies(
       result.dailyLimitPolicies,
@@ -694,6 +696,10 @@ function describePendingConfigChange(pending) {
     return "Turning off Airlock";
   }
 
+  if (pending.type === "disableMovingTarget") {
+    return "Turning off the moving target";
+  }
+
   if (pending.type === "reduceDelay") {
     const unit = pending.delayMinutes === 1 ? "minute" : "minutes";
     return "Reducing wait to " + pending.delayMinutes + " " + unit;
@@ -759,6 +765,16 @@ async function startPendingConfigChange(change) {
     pending = {
       ...pendingBase,
       type: "disableAirlock",
+      remainingMs: waitMinutes * MINUTE_MS
+    };
+  } else if (change.type === "disableMovingTarget") {
+    if (!config.movingTargetEnabled) {
+      return { ok: true, applied: true, pending: null };
+    }
+
+    pending = {
+      ...pendingBase,
+      type: "disableMovingTarget",
       remainingMs: waitMinutes * MINUTE_MS
     };
   } else if (change.type === "removeSite") {
@@ -886,10 +902,14 @@ async function startPendingConfigChange(change) {
       return { ok: false, reason: "invalid-schedule", pending: null };
     }
 
-    if (
-      !config.dailyLockEnabled ||
-      (dailyLockStart === config.dailyLockStart && dailyLockEnd === config.dailyLockEnd)
-    ) {
+    const direction = dailyLockApi.classifyScheduleChange(
+      config.dailyLockStart,
+      config.dailyLockEnd,
+      dailyLockStart,
+      dailyLockEnd
+    );
+
+    if (!config.dailyLockEnabled || direction === "same" || direction === "stronger") {
       await browser.storage.local.set({
         dailyLockStart: dailyLockStart,
         dailyLockEnd: dailyLockEnd
@@ -1024,6 +1044,10 @@ async function applyPendingConfigChange(pending) {
   if (pending.type === "disableAirlock") {
     if (config.enabled) {
       await browser.storage.local.set({ enabled: false });
+    }
+  } else if (pending.type === "disableMovingTarget") {
+    if (config.movingTargetEnabled) {
+      await browser.storage.local.set({ movingTargetEnabled: false });
     }
   } else if (pending.type === "removeSite") {
     const nextSites = config.sites.filter((site) => site !== pending.site);

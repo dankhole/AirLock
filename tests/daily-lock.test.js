@@ -79,3 +79,26 @@ test("calculates scheduled duration across midnight", () => {
   assert.equal(dailyLock.getDurationMinutes("09:00", "17:30"), 8 * 60 + 30);
   assert.equal(dailyLock.getDurationMinutes("09:00", "09:00"), 0);
 });
+
+test("classifies schedule changes by locked-time coverage", () => {
+  assert.equal(
+    dailyLock.classifyScheduleChange("22:00", "07:00", "21:00", "08:00"),
+    "stronger"
+  );
+  assert.equal(
+    dailyLock.classifyScheduleChange("22:00", "07:00", "23:00", "07:00"),
+    "weaker"
+  );
+  assert.equal(
+    dailyLock.classifyScheduleChange("22:00", "07:00", "21:00", "06:00"),
+    "weaker"
+  );
+  assert.equal(
+    dailyLock.classifyScheduleChange("09:00", "17:00", "09:00", "17:00"),
+    "same"
+  );
+  assert.equal(
+    dailyLock.classifyScheduleChange("09:00", "09:00", "08:00", "17:00"),
+    "invalid"
+  );
+});

@@ -417,7 +417,7 @@ test("ending a cooldown early requires the full settings hold", async () => {
   assert.equal(state.localData.pendingConfigChange, undefined);
 });
 
-test("changing an enabled daily lock schedule is guarded", async () => {
+test("daily lock schedule reductions are guarded and strict expansions apply immediately", async () => {
   const { context, state } = await loadBackground(
     baseConfig({
       dailyLockEnabled: true,
@@ -440,10 +440,92 @@ test("changing an enabled daily lock schedule is guarded", async () => {
   const longer = await context.startPendingConfigChange({
     type: "changeDailyLockSchedule",
     dailyLockStart: "21:00",
-    dailyLockEnd: "07:00"
+    dailyLockEnd: "08:00"
   });
-  assert.equal(longer.applied, false);
-  assert.equal(state.localData.dailyLockStart, "23:00");
+  assert.equal(longer.applied, true);
+  assert.equal(state.localData.dailyLockStart, "21:00");
+  assert.equal(state.localData.dailyLockEnd, "08:00");
+  assert.equal(state.localData.pendingConfigChange, undefined);
+});
+
+test("shifting a daily lock is guarded even when its duration does not shrink", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({
+      dailyLockEnabled: true,
+      dailyLockStart: "22:00",
+      dailyLockEnd: "07:00"
+    })
+  );
+
+  const shifted = await context.startPendingConfigChange({
+    type: "changeDailyLockSchedule",
+    dailyLockStart: "21:00",
+    dailyLockEnd: "06:00"
+  });
+
+  assert.equal(shifted.applied, false);
+  assert.equal(state.localData.dailyLockStart, "22:00");
+  assert.equal(state.localData.dailyLockEnd, "07:00");
+});
+
+test("turning off the moving target requires the hover wait", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({ delayMinutes: 2, movingTargetEnabled: true })
+  );
+
+  const response = await context.startPendingConfigChange({
+    type: "disableMovingTarget"
+  });
+
+  assert.equal(response.applied, false);
+  assert.equal(response.pending.remainingMs, 2 * 60 * 1000);
+  assert.equal(state.localData.movingTargetEnabled, true);
+
+  await context.advancePendingConfigChange(60 * 1000);
+  await context.advancePendingConfigChange(60 * 1000);
+  assert.equal(state.localData.movingTargetEnabled, false);
+});
+
+test("site removal, wait reduction, daily-limit removal, and daily-lock disabling are guarded", async () => {
+  const cases = [
+    {
+      config: baseConfig(),
+      change: { type: "removeSite", site: "example.com" },
+      assertUnchanged(state) {
+        assert.deepEqual(state.localData.sites, ["example.com"]);
+      }
+    },
+    {
+      config: baseConfig({ delayMinutes: 2 }),
+      change: { type: "reduceDelay", delayMinutes: 1 },
+      assertUnchanged(state) {
+        assert.equal(state.localData.delayMinutes, 2);
+      }
+    },
+    {
+      config: baseConfig({ dailyLimits: { "example.com": 30 } }),
+      change: { type: "changeDailyLimit", site: "example.com", dailyLimitMinutes: null },
+      assertUnchanged(state) {
+        assert.equal(state.localData.dailyLimits["example.com"], 30);
+      }
+    },
+    {
+      config: baseConfig({ dailyLockEnabled: true }),
+      change: { type: "disableDailyLock" },
+      assertUnchanged(state) {
+        assert.equal(state.localData.dailyLockEnabled, true);
+      }
+    }
+  ];
+
+  for (const testCase of cases) {
+    const { context, state } = await loadBackground(testCase.config);
+    const response = await context.startPendingConfigChange(testCase.change);
+
+    assert.equal(response.applied, false, testCase.change.type);
+    assert.ok(response.pending.remainingMs > 0, testCase.change.type);
+    testCase.assertUnchanged(state);
+  }
 });
 
 test("the site wait is also the hold duration for weaker settings", async () => {

@@ -60,6 +60,32 @@
     return (end.minuteOfDay - start.minuteOfDay + 24 * 60) % (24 * 60);
   }
 
+  function getLockedMinutes(startValue, endValue) {
+    const start = parseTimeOfDay(startValue);
+    const end = parseTimeOfDay(endValue);
+    if (!start || !end || start.minuteOfDay === end.minuteOfDay) return null;
+
+    const lockedMinutes = new Set();
+    let minute = start.minuteOfDay;
+    while (minute !== end.minuteOfDay) {
+      lockedMinutes.add(minute);
+      minute = (minute + 1) % (24 * 60);
+    }
+    return lockedMinutes;
+  }
+
+  function classifyScheduleChange(currentStart, currentEnd, nextStart, nextEnd) {
+    const currentMinutes = getLockedMinutes(currentStart, currentEnd);
+    const nextMinutes = getLockedMinutes(nextStart, nextEnd);
+    if (!currentMinutes || !nextMinutes) return "invalid";
+
+    const removesLockedTime = Array.from(currentMinutes).some(
+      (minute) => !nextMinutes.has(minute)
+    );
+    if (removesLockedTime) return "weaker";
+    return nextMinutes.size > currentMinutes.size ? "stronger" : "same";
+  }
+
   function getState(config, nowValue) {
     const now = new Date(nowValue === undefined ? Date.now() : nowValue);
     const enabled = config && config.enabled === true;
@@ -103,6 +129,7 @@
     parseTimeOfDay: parseTimeOfDay,
     normalizeTimeOfDay: normalizeTimeOfDay,
     getDurationMinutes: getDurationMinutes,
+    classifyScheduleChange: classifyScheduleChange,
     getNextOccurrence: getNextOccurrence,
     getState: getState
   };
