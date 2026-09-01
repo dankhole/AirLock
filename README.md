@@ -4,7 +4,7 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 
 ## How It Works
 
-1. You configure a list of websites, optional per-site daily limits, a hover wait in minutes, optional moving-target motion, and an optional daily lock window via the popup
+1. You configure separate site-entry and settings-change hover delays, a list of websites, optional per-site daily limits, optional moving-target motion, and an optional daily lock window via the popup
 2. When any tab navigates to a tracked site, a fullscreen overlay appears with a countdown timer and breathing focus target
 3. The timer **pauses** when you switch tabs, switch windows, or minimize the browser
 4. The timer **resumes** when you return to the tab and keep the pointer on the overlay target
@@ -13,17 +13,17 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 7. Opening a new tab to the same site starts a fresh timer
 8. Navigating within a site after completing the timer does not re-trigger it again that day
 9. At local midnight, usage counters reset and tracked tabs require a fresh wait
-10. Every security-affecting settings change asks for confirmation; weaker changes also require the configured hover hold before applying
-11. Guarded settings waits only count down while the settings popup is open and the settings hover target is active
+10. Every security-affecting settings change asks for confirmation; weaker changes also require the independently configured settings hold before applying
+11. Settings holds only count down while the popup is open and the settings hover target is active
 12. During the daily lock window, tracked sites show a non-dismissible lock overlay until the configured local end time
 13. Daily lock windows can run within one day or across midnight; open tabs update automatically at both boundaries
 14. Every tracked site records focused, visible time, shared across matching tabs and subdomains; optional daily limits use the same counter, and all usage resets at local midnight
 15. Starting a cooldown blocks every tracked site for one hour, even if the main Airlock toggle is turned off
-16. Ending a cooldown early, disabling a daily lock, or removing any currently locked time from its schedule requires hovering the popup target for the configured hold
+16. Ending a cooldown early, disabling a daily lock, or removing any currently locked time from its schedule requires hovering the popup target for the configured settings hold
 
-After confirmation, stronger settings apply immediately: turning Airlock or the moving target on, adding a tracked site or daily limit, increasing the hover wait, reducing the daily allowance, starting a cooldown, enabling a daily lock, expanding its locked-time coverage, selecting a hard daily-limit block, or lengthening a per-site cooldown.
+After confirmation, stronger settings apply immediately: turning Airlock or the moving target on, adding a tracked site or daily limit, increasing either delay, reducing the daily allowance, starting a cooldown, enabling a daily lock, expanding its locked-time coverage, selecting a hard daily-limit block, or lengthening a per-site cooldown.
 
-Weaker settings require both confirmation and the hover hold: turning Airlock or the moving target off, removing a site or daily limit, reducing the hover wait, increasing the daily allowance, ending a cooldown, disabling a daily lock, changing its schedule in a way that removes any currently locked time, switching from a hard block to a per-site cooldown, or shortening that cooldown. Changing a disabled daily lock's start or end time is neutral and applies immediately.
+Weaker settings require both confirmation and the settings hold: turning Airlock or the moving target off, removing a site or daily limit, reducing the site wait or settings hold, increasing the daily allowance, ending a cooldown, disabling a daily lock, changing its schedule in a way that removes any currently locked time, switching from a hard block to a per-site cooldown, or shortening that cooldown. Changing a disabled daily lock's start or end time is neutral and applies immediately.
 
 Domain matching: entering `reddit.com` will match `reddit.com`, `www.reddit.com`, `old.reddit.com`, etc.
 
@@ -80,7 +80,7 @@ After making source changes, run `npm run build` and reload the extension.
 - Minimize the browser -- timer pauses
 - Restore -- timer resumes
 - Enable hover target -- timer only runs while hovering the circle
-- Start a guarded settings change -- countdown only runs while hovering the popup target
+- Start a guarded settings change -- its independent **Settings hold** countdown only runs while hovering the popup target
 
 ### Daily lock
 - Enable **Daily lock** and choose different start and end times
@@ -100,7 +100,7 @@ After making source changes, run `npm run build` and reload the extension.
 ### Cooldown
 - Click **Start 1 hour** and verify every tracked site immediately shows a non-dismissible cooldown overlay
 - Toggle Airlock off and verify the cooldown remains active
-- Click **End early**, hover the orange popup target for the configured unlock hold, and verify access resumes only after the hold completes
+- Click **End early**, hover the orange popup target for the configured settings hold, and verify access resumes only after the hold completes
 - Change an enabled daily lock so that it loses any currently locked time and verify the same hold is required; expand it without losing locked time and verify it applies immediately after confirmation
 
 ### Persistence

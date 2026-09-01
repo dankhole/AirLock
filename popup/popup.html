@@ -17,9 +17,17 @@
     </header>
 
     <section class="delay-section">
-      <label for="delay-input" title="Controls both site-entry waits and the hold required to weaken restrictions">Hover wait</label>
+      <label for="delay-input" title="How long to hover before entering a tracked site">Site wait</label>
       <div class="delay-input-group">
         <input type="number" id="delay-input" min="1" max="600" value="1">
+        <span class="delay-unit">minutes</span>
+      </div>
+    </section>
+
+    <section class="delay-section">
+      <label for="settings-delay-input" title="How long to hover before a weaker setting applies">Settings hold</label>
+      <div class="delay-input-group">
+        <input type="number" id="settings-delay-input" min="1" max="600" value="1">
         <span class="delay-unit">minutes</span>
       </div>
     </section>

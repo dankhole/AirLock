@@ -154,6 +154,7 @@ function baseConfig(overrides = {}) {
     enabled: true,
     sites: ["example.com"],
     delayMinutes: 1,
+    settingsDelayMinutes: 1,
     dailyLimits: {},
     dailyLimitPolicies: {},
     dailyLimitCooldowns: {},
@@ -388,10 +389,11 @@ test("a per-site cooldown starts at the limit and resets usage when it expires",
   assert.equal(state.localData.dailyUsage.sites["example.com"], 61 * 1000);
 });
 
-test("switching from a hard block to cooldown requires the hover wait", async () => {
+test("switching from a hard block to cooldown requires the settings hold", async () => {
   const { context, state } = await loadBackground(
     baseConfig({
       delayMinutes: 2,
+      settingsDelayMinutes: 2,
       dailyLimits: { "example.com": 30 }
     })
   );
@@ -428,10 +430,11 @@ test("making a per-site cooldown longer applies immediately", async () => {
   assert.equal(state.localData.pendingConfigChange, undefined);
 });
 
-test("shortening a per-site cooldown requires the hover wait", async () => {
+test("shortening a per-site cooldown requires the settings hold", async () => {
   const { context, state } = await loadBackground(
     baseConfig({
       delayMinutes: 2,
+      settingsDelayMinutes: 2,
       dailyLimits: { "example.com": 30 },
       dailyLimitPolicies: {
         "example.com": { mode: "cooldown", cooldownMinutes: 60 }
@@ -550,9 +553,9 @@ test("shifting a daily lock is guarded even when its duration does not shrink", 
   assert.equal(state.localData.dailyLockEnd, "07:00");
 });
 
-test("turning off the moving target requires the hover wait", async () => {
+test("turning off the moving target requires the settings hold", async () => {
   const { context, state } = await loadBackground(
-    baseConfig({ delayMinutes: 2, movingTargetEnabled: true })
+    baseConfig({ delayMinutes: 7, settingsDelayMinutes: 2, movingTargetEnabled: true })
   );
 
   const response = await context.startPendingConfigChange({
@@ -610,27 +613,65 @@ test("site removal, wait reduction, daily-limit removal, and daily-lock disablin
   }
 });
 
-test("the site wait is also the hold duration for weaker settings", async () => {
+test("the settings hold is independent from the site wait", async () => {
   const { context, state } = await loadBackground(
-    baseConfig({ delayMinutes: 3 })
+    baseConfig({ delayMinutes: 3, settingsDelayMinutes: 4 })
   );
 
+  const siteWait = await context.handleContentReady(7, "example.com");
   const disable = await context.startPendingConfigChange({ type: "disableAirlock" });
-  assert.equal(disable.pending.remainingMs, 3 * 60 * 1000);
+  assert.equal(siteWait.remainingMs, 3 * 60 * 1000);
+  assert.equal(disable.pending.remainingMs, 4 * 60 * 1000);
   assert.equal(state.localData.enabled, true);
 });
 
-test("legacy settings migrate to one stricter wait and remove reset hours", async () => {
+test("reducing the settings hold uses its previous duration without changing the site wait", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({ delayMinutes: 8, settingsDelayMinutes: 2 })
+  );
+
+  const response = await context.startPendingConfigChange({
+    type: "reduceSettingsDelay",
+    settingsDelayMinutes: 1
+  });
+
+  assert.equal(response.applied, false);
+  assert.equal(response.pending.remainingMs, 2 * 60 * 1000);
+  assert.equal(state.localData.settingsDelayMinutes, 2);
+  assert.equal(state.localData.delayMinutes, 8);
+
+  await context.advancePendingConfigChange(60 * 1000);
+  await context.advancePendingConfigChange(60 * 1000);
+  assert.equal(state.localData.settingsDelayMinutes, 1);
+  assert.equal(state.localData.delayMinutes, 8);
+});
+
+test("the unified wait migrates to both settings when no legacy guard remains", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({ delayMinutes: 4, settingsDelayMinutes: undefined })
+  );
+
+  assert.equal(state.localData.delayMinutes, 4);
+  assert.equal(state.localData.settingsDelayMinutes, 4);
+
+  delete state.localData.settingsDelayMinutes;
+  const configBeforeMigrationCompletes = await context.readConfig();
+  assert.equal(configBeforeMigrationCompletes.settingsDelayMinutes, 4);
+});
+
+test("legacy settings migrate into separate site and settings waits", async () => {
   const { state } = await loadBackground(
     baseConfig({
       delayMinutes: 2,
+      settingsDelayMinutes: undefined,
       guardMinutes: 5,
       requireHoverTarget: false,
       resetHours: 48
     })
   );
 
-  assert.equal(state.localData.delayMinutes, 5);
+  assert.equal(state.localData.delayMinutes, 2);
+  assert.equal(state.localData.settingsDelayMinutes, 5);
   assert.equal(state.localData.movingTargetEnabled, false);
   assert.equal(state.localData.guardMinutes, undefined);
   assert.equal(state.localData.requireHoverTarget, undefined);

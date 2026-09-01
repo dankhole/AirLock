@@ -6,6 +6,7 @@ const DEFAULT_CONFIG = {
   enabled: true,
   sites: [],
   delayMinutes: 1,
+  settingsDelayMinutes: 1,
   movingTargetEnabled: false,
   dailyLimits: {},
   dailyLimitPolicies: {},
@@ -69,6 +70,7 @@ async function migrateStoredConfig() {
     "enabled",
     "sites",
     "delayMinutes",
+    "settingsDelayMinutes",
     "delaySeconds",
     "resetHours",
     "movingTargetEnabled",
@@ -90,11 +92,16 @@ async function migrateStoredConfig() {
   if (existing.sites === undefined) updates.sites = DEFAULT_CONFIG.sites;
 
   const delayMinutes = clampDelayMinutes(existing.delayMinutes || DEFAULT_CONFIG.delayMinutes);
-  const legacyGuardMinutes = existing.guardMinutes === undefined
-    ? delayMinutes
-    : clampDelayMinutes(existing.guardMinutes);
-  const unifiedWaitMinutes = Math.max(delayMinutes, legacyGuardMinutes);
-  if (existing.delayMinutes !== unifiedWaitMinutes) updates.delayMinutes = unifiedWaitMinutes;
+  if (existing.delayMinutes !== delayMinutes) updates.delayMinutes = delayMinutes;
+
+  const settingsDelayMinutes = existing.settingsDelayMinutes === undefined
+    ? (existing.guardMinutes === undefined
+        ? delayMinutes
+        : clampDelayMinutes(existing.guardMinutes))
+    : clampDelayMinutes(existing.settingsDelayMinutes);
+  if (existing.settingsDelayMinutes !== settingsDelayMinutes) {
+    updates.settingsDelayMinutes = settingsDelayMinutes;
+  }
 
   if (typeof existing.movingTargetEnabled !== "boolean") {
     updates.movingTargetEnabled = DEFAULT_CONFIG.movingTargetEnabled;
@@ -174,6 +181,7 @@ async function readConfig() {
     "enabled",
     "sites",
     "delayMinutes",
+    "settingsDelayMinutes",
     "movingTargetEnabled",
     "dailyLimits",
     "dailyLimitPolicies",
@@ -182,10 +190,14 @@ async function readConfig() {
     "dailyLockStart",
     "dailyLockEnd"
   ]);
+  const delayMinutes = clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes);
   return {
     enabled: result.enabled !== false,
     sites: result.sites || [],
-    delayMinutes: clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes),
+    delayMinutes: delayMinutes,
+    settingsDelayMinutes: clampDelayMinutes(
+      result.settingsDelayMinutes || delayMinutes
+    ),
     movingTargetEnabled: result.movingTargetEnabled === true,
     dailyLimits: normalizeDailyLimits(result.dailyLimits, result.sites || []),
     dailyLimitPolicies: normalizeDailyLimitPolicies(
@@ -742,6 +754,11 @@ function describePendingConfigChange(pending) {
     return "Reducing wait to " + pending.delayMinutes + " " + unit;
   }
 
+  if (pending.type === "reduceSettingsDelay") {
+    const unit = pending.settingsDelayMinutes === 1 ? "minute" : "minutes";
+    return "Reducing settings hold to " + pending.settingsDelayMinutes + " " + unit;
+  }
+
   if (pending.type === "changeDailyLimit") {
     if (pending.dailyLimitMinutes === null) {
       return "Removing daily limit for " + pending.site;
@@ -780,7 +797,7 @@ async function startPendingConfigChange(change) {
 
   const config = await readConfig();
   const startedAt = Date.now();
-  const waitMinutes = config.delayMinutes;
+  const waitMinutes = config.settingsDelayMinutes;
   const pendingBase = {
     id: String(startedAt),
     startedAt: startedAt,
@@ -833,7 +850,25 @@ async function startPendingConfigChange(change) {
       ...pendingBase,
       type: "reduceDelay",
       remainingMs: waitMinutes * MINUTE_MS,
-      delayMinutes: delayMinutes
+      delayMinutes: delayMinutes,
+      previousDelayMinutes: config.delayMinutes
+    };
+  } else if (change.type === "reduceSettingsDelay") {
+    const settingsDelayMinutes = clampDelayMinutes(
+      change.settingsDelayMinutes || DEFAULT_CONFIG.settingsDelayMinutes
+    );
+
+    if (settingsDelayMinutes >= config.settingsDelayMinutes) {
+      await browser.storage.local.set({ settingsDelayMinutes: settingsDelayMinutes });
+      return { ok: true, applied: true, pending: null };
+    }
+
+    pending = {
+      ...pendingBase,
+      type: "reduceSettingsDelay",
+      remainingMs: waitMinutes * MINUTE_MS,
+      settingsDelayMinutes: settingsDelayMinutes,
+      previousSettingsDelayMinutes: config.settingsDelayMinutes
     };
   } else if (change.type === "changeDailyLimit") {
     const site = String(change.site || "").trim().toLowerCase();
@@ -1057,7 +1092,9 @@ function getPendingRemainingMs(pending) {
     return Math.max(0, pending.unlockAt - Date.now());
   }
 
-  const waitMinutes = clampDelayMinutes(pending.waitMinutes || DEFAULT_CONFIG.delayMinutes);
+  const waitMinutes = clampDelayMinutes(
+    pending.waitMinutes || DEFAULT_CONFIG.settingsDelayMinutes
+  );
   return waitMinutes * MINUTE_MS;
 }
 
@@ -1092,8 +1129,21 @@ async function applyPendingConfigChange(pending) {
     });
   } else if (pending.type === "reduceDelay") {
     const delayMinutes = clampDelayMinutes(pending.delayMinutes || DEFAULT_CONFIG.delayMinutes);
-    if (delayMinutes < config.delayMinutes && config.delayMinutes <= pending.waitMinutes) {
+    const unchanged = pending.previousDelayMinutes === undefined
+      ? config.delayMinutes <= pending.waitMinutes
+      : config.delayMinutes === pending.previousDelayMinutes;
+    if (delayMinutes < config.delayMinutes && unchanged) {
       await browser.storage.local.set({ delayMinutes: delayMinutes });
+    }
+  } else if (pending.type === "reduceSettingsDelay") {
+    const settingsDelayMinutes = clampDelayMinutes(
+      pending.settingsDelayMinutes || DEFAULT_CONFIG.settingsDelayMinutes
+    );
+    if (
+      settingsDelayMinutes < config.settingsDelayMinutes &&
+      config.settingsDelayMinutes === pending.previousSettingsDelayMinutes
+    ) {
+      await browser.storage.local.set({ settingsDelayMinutes: settingsDelayMinutes });
     }
   } else if (pending.type === "changeDailyLimit" && config.sites.includes(pending.site)) {
     const nextDailyLimits = { ...config.dailyLimits };

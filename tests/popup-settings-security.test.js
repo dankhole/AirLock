@@ -154,6 +154,7 @@ function createDocument() {
   const tagById = {
     "enabled-toggle": "input",
     "delay-input": "input",
+    "settings-delay-input": "input",
     "moving-target-toggle": "input",
     "cooldown-btn": "button",
     "daily-lock-toggle": "input",
@@ -171,7 +172,7 @@ function createDocument() {
     "confirm-dialog-submit": "button"
   };
   const ids = [
-    "enabled-toggle", "delay-input", "moving-target-toggle",
+    "enabled-toggle", "delay-input", "settings-delay-input", "moving-target-toggle",
     "cooldown-status", "cooldown-btn", "daily-lock-toggle", "daily-lock-start",
     "daily-lock-end", "daily-lock-status", "site-list", "add-site-form",
     "site-input", "add-current-btn", "add-site-btn", "pending-config-section",
@@ -221,6 +222,7 @@ async function loadPopup(overrides = {}, options = {}) {
     enabled: true,
     sites: ["example.com"],
     delayMinutes: 2,
+    settingsDelayMinutes: 2,
     movingTargetEnabled: false,
     dailyLimits: {},
     dailyLimitPolicies: {},
@@ -324,7 +326,7 @@ function lastPendingChange(environment) {
     .at(-1)?.change;
 }
 
-test("security-increasing settings require confirmation and then apply without a hover hold", async () => {
+test("security-increasing settings require confirmation and then apply without a settings hold", async () => {
   const enable = await loadPopup({ enabled: false });
   await runConfirmedAction(enable, enable.elements["enabled-toggle"], "change", () => {
     enable.elements["enabled-toggle"].checked = true;
@@ -338,6 +340,16 @@ test("security-increasing settings require confirmation and then apply without a
   });
   assert.equal(delay.localData.delayMinutes, 5);
   assert.equal(lastPendingChange(delay), undefined);
+
+  const settingsDelay = await loadPopup({ settingsDelayMinutes: 2 });
+  await runConfirmedAction(
+    settingsDelay,
+    settingsDelay.elements["settings-delay-input"],
+    "change",
+    () => { settingsDelay.elements["settings-delay-input"].value = "5"; }
+  );
+  assert.equal(settingsDelay.localData.settingsDelayMinutes, 5);
+  assert.equal(lastPendingChange(settingsDelay), undefined);
 
   const moving = await loadPopup({ movingTargetEnabled: false });
   await runConfirmedAction(moving, moving.elements["moving-target-toggle"], "change", () => {
@@ -382,7 +394,7 @@ test("security-increasing settings require confirmation and then apply without a
   assert.equal(lastPendingChange(dailyLimit), undefined);
 });
 
-test("security-reducing settings require confirmation before starting the hover hold", async () => {
+test("security-reducing settings require confirmation before starting the settings hold", async () => {
   const cases = [
     {
       config: { enabled: true },
@@ -397,6 +409,13 @@ test("security-reducing settings require confirmation before starting the hover 
       event: "change",
       prepare(environment) { environment.elements[this.id].value = "2"; },
       type: "reduceDelay"
+    },
+    {
+      config: { settingsDelayMinutes: 5 },
+      id: "settings-delay-input",
+      event: "change",
+      prepare(environment) { environment.elements[this.id].value = "2"; },
+      type: "reduceSettingsDelay"
     },
     {
       config: { movingTargetEnabled: true },
