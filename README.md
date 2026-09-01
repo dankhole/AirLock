@@ -19,7 +19,8 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 13. Daily lock windows can run within one day or across midnight; open tabs update automatically at both boundaries
 14. Every tracked site records focused, visible time, shared across matching tabs and subdomains; optional daily limits use the same counter, and all usage resets at local midnight
 15. Starting a cooldown blocks every tracked site for one hour, even if the main Airlock toggle is turned off
-16. Ending a cooldown early, disabling a daily lock, or removing any currently locked time from its schedule requires hovering the popup target for the configured settings hold
+16. At every 20 minutes of focused use on a tracked site, a small in-page check-in offers a one-click, one-hour cooldown; dismissing it leaves the page uninterrupted, and the next check-in appears 20 minutes later
+17. Ending a cooldown early, disabling a daily lock, or removing any currently locked time from its schedule requires hovering the popup target for the configured settings hold
 
 After confirmation, stronger settings apply immediately: turning Airlock or the moving target on, adding a tracked site or daily limit, increasing either delay, reducing the daily allowance, starting a cooldown, enabling a daily lock, expanding its locked-time coverage, selecting a hard daily-limit block, or lengthening a per-site cooldown.
 
@@ -46,9 +47,9 @@ For official Firefox uploads, package the authored source files directly instead
 
 ```sh
 mkdir -p store
-rm -f store/firefox-addon-1.0.7.zip
-zip -j store/firefox-addon-1.0.7.zip firefox/manifest.json
-zip -r store/firefox-addon-1.0.7.zip background content popup shared icons -x '*.DS_Store'
+rm -f store/firefox-addon-1.0.12.zip
+zip -j store/firefox-addon-1.0.12.zip firefox/manifest.json
+zip -r store/firefox-addon-1.0.12.zip background content popup shared icons -x '*.DS_Store'
 ```
 
 This keeps the submitted Firefox package free of generated extension files. The AMO generated-code question can be answered "No" when using this package.
@@ -99,6 +100,8 @@ After making source changes, run `npm run build` and reload the extension.
 
 ### Cooldown
 - Click **Start 1 hour** and verify every tracked site immediately shows a non-dismissible cooldown overlay
+- Reach 20 minutes of focused use on a tracked site and verify the small check-in can either be dismissed or start the same one-hour cooldown
+- Keep using the site after dismissing and verify another check-in appears at 40 minutes, not before
 - Toggle Airlock off and verify the cooldown remains active
 - Click **End early**, hover the orange popup target for the configured settings hold, and verify access resumes only after the hold completes
 - Change an enabled daily lock so that it loses any currently locked time and verify the same hold is required; expand it without losing locked time and verify it applies immediately after confirmation

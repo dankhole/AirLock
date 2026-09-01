@@ -107,6 +107,9 @@
   let backdrop = null;
   let hoverTarget = null;
   let hoverTargetSlot = null;
+  let usageReminderHost = null;
+  let usageReminderMessage = null;
+  let usageReminderStartButton = null;
   let movingTargetFrame = null;
   let movingTargetLastFrameAt = null;
   let movingTargetOffsetX = 0;
@@ -121,6 +124,131 @@
   let lastPausedLabelText = null;
   let lastTimerPaused = null;
   let lastContinueVisible = null;
+
+  // --- Usage Reminder ---
+
+  function dismissUsageReminder() {
+    if (usageReminderHost) usageReminderHost.remove();
+    usageReminderHost = null;
+    usageReminderMessage = null;
+    usageReminderStartButton = null;
+  }
+
+  function showUsageReminder(reminder) {
+    if (
+      overlayMode !== null ||
+      !reminder ||
+      !Number.isFinite(reminder.milestoneMinutes)
+    ) return;
+
+    if (!usageReminderHost) {
+      document.querySelectorAll("airlock-usage-reminder").forEach((existingReminder) => {
+        existingReminder.remove();
+      });
+
+      const host = document.createElement("airlock-usage-reminder");
+      host.style.cssText = "all: initial !important; position: fixed !important; right: 20px !important; bottom: 20px !important; z-index: 2147483646 !important; pointer-events: none !important;";
+      const reminderRoot = host.attachShadow({ mode: "closed" });
+      reminderRoot.innerHTML = `
+        <style>
+          :host { all: initial; }
+          * { box-sizing: border-box; }
+          .reminder {
+            width: min(360px, calc(100vw - 32px));
+            padding: 18px;
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            border-radius: 14px;
+            background: rgba(15, 23, 42, 0.97);
+            color: #f8fafc;
+            box-shadow: 0 18px 50px rgba(2, 6, 23, 0.38);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            pointer-events: auto;
+          }
+          .eyebrow {
+            margin: 0 0 7px;
+            color: #a78bfa;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+          }
+          .message {
+            margin: 0;
+            color: #e2e8f0;
+            font-size: 15px;
+            line-height: 1.45;
+          }
+          .actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 15px;
+          }
+          button {
+            min-height: 36px;
+            padding: 8px 12px;
+            border: 0;
+            border-radius: 8px;
+            font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            cursor: pointer;
+          }
+          .dismiss {
+            background: transparent;
+            color: #cbd5e1;
+          }
+          .dismiss:hover { background: rgba(148, 163, 184, 0.12); }
+          .start {
+            background: #7c3aed;
+            color: white;
+          }
+          .start:hover { background: #6d28d9; }
+          .start:disabled { cursor: wait; opacity: 0.65; }
+          @media (max-width: 480px) {
+            .reminder { width: calc(100vw - 32px); }
+            .actions { flex-direction: column-reverse; }
+            button { width: 100%; }
+          }
+        </style>
+        <section class="reminder" role="dialog" aria-label="Usage reminder">
+          <p class="eyebrow">Airlock check-in</p>
+          <p class="message" id="usage-reminder-message"></p>
+          <div class="actions">
+            <button class="dismiss" id="usage-reminder-dismiss" type="button">Not now</button>
+            <button class="start" id="usage-reminder-start" type="button">Start 1-hour cooldown</button>
+          </div>
+        </section>
+      `;
+
+      document.documentElement.appendChild(host);
+      usageReminderHost = host;
+      usageReminderMessage = reminderRoot.getElementById("usage-reminder-message");
+      usageReminderStartButton = reminderRoot.getElementById("usage-reminder-start");
+      reminderRoot
+        .getElementById("usage-reminder-dismiss")
+        .addEventListener("click", dismissUsageReminder);
+      usageReminderStartButton.addEventListener("click", () => {
+        usageReminderStartButton.disabled = true;
+        browser.runtime
+          .sendMessage({ type: "START_COOLDOWN" })
+          .then((result) => {
+            if (!result || result.ok !== true) throw new Error("Cooldown did not start");
+            showCooldown(result.cooldownUntil);
+          })
+          .catch(() => {
+            if (usageReminderStartButton) usageReminderStartButton.disabled = false;
+            if (usageReminderMessage) {
+              usageReminderMessage.textContent =
+                "The cooldown could not be started. You can try again from the Airlock popup.";
+            }
+          });
+      });
+    }
+
+    const site = typeof reminder.site === "string" ? reminder.site : hostname;
+    usageReminderMessage.textContent =
+      "You've spent " + reminder.milestoneMinutes + " minutes on " + site +
+      " today. Want to step away for an hour?";
+  }
 
   // --- Create Overlay ---
 
@@ -556,6 +684,7 @@
   }
 
   function showOverlay(nextRemainingMs, active = backgroundActive) {
+    dismissUsageReminder();
     clearTimerTimeout();
     clearDailyLockTimeout();
     stopDailyUsageTracking();
@@ -597,6 +726,7 @@
   }
 
   function showHardLock(mode, unlockAt) {
+    dismissUsageReminder();
     if (overlayMode === "timer") {
       setRunning(false, { persistPaused: true });
     } else {
@@ -1042,6 +1172,8 @@
           : dailyUsageResetAt;
         if (result.reached) {
           showDailyLimit(result.resetAt, result.limitMinutes, result.dailyLimitMode);
+        } else if (result.usageReminder) {
+          showUsageReminder(result.usageReminder);
         }
       })
       .catch(() => {
@@ -1185,6 +1317,7 @@
       );
       dailyUsageTrackingEnabled = stillTracked;
       if (!stillTracked) {
+        dismissUsageReminder();
         dismissOverlay({ notifyDone: false });
       } else {
         recheckConfig();

@@ -27,6 +27,7 @@ const MAX_DAILY_LIMIT_MINUTES = 24 * 60;
 const DEFAULT_DAILY_LIMIT_COOLDOWN_MINUTES = 60;
 const MAX_DAILY_LIMIT_COOLDOWN_MINUTES = 24 * 60;
 const MAX_USAGE_UPDATE_MS = 5 * 1000;
+const USAGE_REMINDER_INTERVAL_MS = 20 * MINUTE_MS;
 
 // --- Initialization ---
 
@@ -80,6 +81,7 @@ async function migrateStoredConfig() {
     "dailyLimitCooldowns",
     "dailyLimitUsageOffsets",
     "dailyUsage",
+    "usageReminderMilestones",
     "guardMinutes",
     "cooldownUntil",
     "dailyLockEnabled",
@@ -133,6 +135,12 @@ async function migrateStoredConfig() {
   }
   if (!existing.dailyLimitUsageOffsets || typeof existing.dailyLimitUsageOffsets !== "object") {
     updates.dailyLimitUsageOffsets = createEmptyDailyUsage();
+  }
+  if (
+    !existing.usageReminderMilestones ||
+    typeof existing.usageReminderMilestones !== "object"
+  ) {
+    updates.usageReminderMilestones = createEmptyUsageReminderMilestones();
   }
 
   const cooldownUntil = normalizeCooldownUntil(existing.cooldownUntil);
@@ -359,23 +367,34 @@ function createEmptyDailyUsage(now = Date.now()) {
   return { date: getLocalDateKey(now), sites: {} };
 }
 
+function createEmptyUsageReminderMilestones(now = Date.now()) {
+  return { date: getLocalDateKey(now), sites: {} };
+}
+
 async function resetDailyStateIfNeeded(now = Date.now()) {
   const today = getLocalDateKey(now);
   const stored = await browser.storage.local.get([
     "dailyUsage",
-    "dailyLimitUsageOffsets"
+    "dailyLimitUsageOffsets",
+    "usageReminderMilestones"
   ]);
   const usageIsCurrent = stored.dailyUsage && stored.dailyUsage.date === today;
   const offsetsAreCurrent =
     stored.dailyLimitUsageOffsets && stored.dailyLimitUsageOffsets.date === today;
+  const remindersAreCurrent =
+    stored.usageReminderMilestones && stored.usageReminderMilestones.date === today;
 
-  if (usageIsCurrent && offsetsAreCurrent) return false;
+  if (usageIsCurrent && offsetsAreCurrent && remindersAreCurrent) return false;
 
-  await browser.storage.local.set({
-    dailyUsage: createEmptyDailyUsage(now),
-    dailyLimitUsageOffsets: createEmptyDailyUsage(now),
-    dailyLimitCooldowns: {}
-  });
+  const updates = {};
+  if (!usageIsCurrent) updates.dailyUsage = createEmptyDailyUsage(now);
+  if (!offsetsAreCurrent) updates.dailyLimitUsageOffsets = createEmptyDailyUsage(now);
+  if (!remindersAreCurrent) {
+    updates.usageReminderMilestones = createEmptyUsageReminderMilestones(now);
+  }
+  if (!usageIsCurrent || !offsetsAreCurrent) updates.dailyLimitCooldowns = {};
+
+  await browser.storage.local.set(updates);
   return true;
 }
 
@@ -394,6 +413,49 @@ async function readDailyUsage(now = Date.now()) {
       Object.entries(stored.sites)
         .map(([site, usedMs]) => [site, Math.max(0, Number(usedMs) || 0)])
     )
+  };
+}
+
+async function readUsageReminderMilestones(now = Date.now()) {
+  const result = await browser.storage.local.get("usageReminderMilestones");
+  const stored = result.usageReminderMilestones;
+  const today = getLocalDateKey(now);
+
+  if (!stored || stored.date !== today || !stored.sites || typeof stored.sites !== "object") {
+    return createEmptyUsageReminderMilestones(now);
+  }
+
+  return {
+    date: today,
+    sites: Object.fromEntries(
+      Object.entries(stored.sites)
+        .map(([site, milestone]) => [site, Math.max(0, Math.floor(Number(milestone) || 0))])
+    )
+  };
+}
+
+async function recordUsageReminderMilestone(site, previousUsedMs, nextUsedMs, now = Date.now()) {
+  const reminders = await readUsageReminderMilestones(now);
+  const previousMilestone = Math.floor(previousUsedMs / USAGE_REMINDER_INTERVAL_MS);
+  const nextMilestone = Math.floor(nextUsedMs / USAGE_REMINDER_INTERVAL_MS);
+  const storedMilestone = Object.prototype.hasOwnProperty.call(reminders.sites, site)
+    ? reminders.sites[site]
+    : previousMilestone;
+  const lastMilestone = Math.max(storedMilestone, previousMilestone);
+
+  if (nextMilestone <= lastMilestone) {
+    if (!Object.prototype.hasOwnProperty.call(reminders.sites, site)) {
+      reminders.sites[site] = lastMilestone;
+      await browser.storage.local.set({ usageReminderMilestones: reminders });
+    }
+    return null;
+  }
+
+  reminders.sites[site] = nextMilestone;
+  await browser.storage.local.set({ usageReminderMilestones: reminders });
+  return {
+    site: site,
+    milestoneMinutes: nextMilestone * (USAGE_REMINDER_INTERVAL_MS / MINUTE_MS)
   };
 }
 
@@ -1584,7 +1646,8 @@ async function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
 
   const usage = await readDailyUsage(now);
   const site = getTrackedSite(domain, config.sites);
-  usage.sites[site] = (usage.sites[site] || 0) + elapsed;
+  const previousUsedMs = usage.sites[site] || 0;
+  usage.sites[site] = previousUsedMs + elapsed;
   await browser.storage.local.set({ dailyUsage: usage });
 
   const state = await getDailyLimitState(config, domain, now, config.enabled);
@@ -1601,13 +1664,21 @@ async function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
     };
   }
 
+  const usageReminder = await recordUsageReminderMilestone(
+    site,
+    previousUsedMs,
+    usage.sites[site],
+    now
+  );
+
   return {
     ok: true,
     reached: false,
     resetAt: state.resetAt,
     limitMinutes: state.limitMinutes,
     dailyLimitMode: state.limitMode,
-    remainingMs: state.remainingMs
+    remainingMs: state.remainingMs,
+    usageReminder: usageReminder
   };
 }
 

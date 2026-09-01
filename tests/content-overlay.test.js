@@ -29,11 +29,19 @@ function createClassList() {
 }
 
 function createElement(onRemove = () => {}, rect = null) {
+  const listeners = new Map();
   return {
     style: {},
     classList: createClassList(),
     textContent: "",
-    addEventListener() {},
+    disabled: false,
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(listener);
+    },
+    click() {
+      (listeners.get("click") || []).forEach((listener) => listener({ type: "click" }));
+    },
     remove: onRemove,
     getBoundingClientRect() {
       return rect || { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
@@ -43,6 +51,7 @@ function createElement(onRemove = () => {}, rect = null) {
 
 function createDocument() {
   const overlayHosts = [];
+  const reminderHosts = [];
 
   return {
     visibilityState: "visible",
@@ -52,27 +61,38 @@ function createDocument() {
     },
     addEventListener() {},
     querySelectorAll(selector) {
-      return selector === "airlock-overlay" ? [...overlayHosts] : [];
+      if (selector === "airlock-overlay") return [...overlayHosts];
+      if (selector === "airlock-usage-reminder") return [...reminderHosts];
+      return [];
     },
     createElement(tagName) {
-      assert.equal(tagName, "airlock-overlay");
+      assert.ok(["airlock-overlay", "airlock-usage-reminder"].includes(tagName));
+      const hosts = tagName === "airlock-overlay" ? overlayHosts : reminderHosts;
       const host = createElement(() => {
-        const index = overlayHosts.indexOf(host);
-        if (index !== -1) overlayHosts.splice(index, 1);
+        const index = hosts.indexOf(host);
+        if (index !== -1) hosts.splice(index, 1);
       });
-      const elements = {
-        backdrop: createElement(),
-        "overlay-message": createElement(),
-        "timer-display": createElement(),
-        "paused-label": createElement(),
-        "continue-btn": createElement(),
-        "hover-target": createElement(),
-        "hover-target-slot": createElement(
-          () => {},
-          { left: 116, top: 116, right: 284, bottom: 284, width: 168, height: 168 }
-        )
-      };
-      this.latestElements = elements;
+      host.tagName = tagName;
+      const elements = tagName === "airlock-overlay"
+        ? {
+            backdrop: createElement(),
+            "overlay-message": createElement(),
+            "timer-display": createElement(),
+            "paused-label": createElement(),
+            "continue-btn": createElement(),
+            "hover-target": createElement(),
+            "hover-target-slot": createElement(
+              () => {},
+              { left: 116, top: 116, right: 284, bottom: 284, width: 168, height: 168 }
+            )
+          }
+        : {
+            "usage-reminder-message": createElement(),
+            "usage-reminder-dismiss": createElement(),
+            "usage-reminder-start": createElement()
+          };
+      if (tagName === "airlock-overlay") this.latestElements = elements;
+      else this.latestReminderElements = elements;
       host.attachShadow = () => ({
         innerHTML: "",
         querySelector(selector) {
@@ -86,10 +106,12 @@ function createDocument() {
     },
     documentElement: {
       appendChild(host) {
-        overlayHosts.push(host);
+        if (host.tagName === "airlock-overlay") overlayHosts.push(host);
+        else reminderHosts.push(host);
       }
     },
-    overlayHosts: overlayHosts
+    overlayHosts: overlayHosts,
+    reminderHosts: reminderHosts
   };
 }
 
@@ -127,6 +149,15 @@ function createContext(document, options = {}) {
           };
         }
         if (message.type === "GET_ACTIVE_STATE") return { active: true };
+        if (message.type === "DAILY_USAGE_UPDATE") {
+          return options.dailyUsageResponse;
+        }
+        if (message.type === "START_COOLDOWN") {
+          return options.startCooldownResponse || {
+            ok: true,
+            cooldownUntil: now + 60 * 60 * 1000
+          };
+        }
         return undefined;
       }
     }
@@ -259,4 +290,64 @@ test("usage tracking runs without a daily limit or enabled wait setting", async 
   assert.ok(usageMessage);
   assert.equal(usageMessage.domain, "example.com");
   assert.equal(usageMessage.elapsedMs, 1000);
+});
+
+test("a usage milestone shows an unobtrusive reminder with a one-hour cooldown action", async () => {
+  const document = createDocument();
+  const context = createContext(document, {
+    enabled: false,
+    contentReadyResponse: {
+      type: "NO_OVERLAY",
+      active: true
+    },
+    dailyUsageResponse: {
+      ok: true,
+      reached: false,
+      usageReminder: {
+        site: "example.com",
+        milestoneMinutes: 20
+      }
+    }
+  });
+
+  await vm.runInContext(contentSource, context);
+  context.advanceTime(1000);
+  context.runIntervals();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(document.reminderHosts.length, 1);
+  assert.equal(
+    document.latestReminderElements["usage-reminder-message"].textContent,
+    "You've spent 20 minutes on example.com today. Want to step away for an hour?"
+  );
+
+  document.latestReminderElements["usage-reminder-start"].click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(context.sentMessages.some((message) => message.type === "START_COOLDOWN"));
+  assert.equal(document.reminderHosts.length, 0);
+  assert.equal(document.overlayHosts.length, 1);
+});
+
+test("a usage reminder can be dismissed without interrupting the page", async () => {
+  const document = createDocument();
+  const context = createContext(document, {
+    enabled: false,
+    contentReadyResponse: { type: "NO_OVERLAY", active: true },
+    dailyUsageResponse: {
+      ok: true,
+      reached: false,
+      usageReminder: { site: "example.com", milestoneMinutes: 20 }
+    }
+  });
+
+  await vm.runInContext(contentSource, context);
+  context.advanceTime(1000);
+  context.runIntervals();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  document.latestReminderElements["usage-reminder-dismiss"].click();
+
+  assert.equal(document.reminderHosts.length, 0);
+  assert.equal(document.overlayHosts.length, 0);
 });

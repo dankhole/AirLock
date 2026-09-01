@@ -159,6 +159,7 @@ function baseConfig(overrides = {}) {
     dailyLimitPolicies: {},
     dailyLimitCooldowns: {},
     dailyUsage: { date: localDateKey(), sites: {} },
+    usageReminderMilestones: { date: localDateKey(), sites: {} },
     cooldownUntil: null,
     dailyLockEnabled: false,
     dailyLockStart: "22:00",
@@ -299,6 +300,48 @@ test("daily totals continue past a configured limit while Airlock is off", async
   assert.equal(state.localData.dailyUsage.sites["example.com"], 61 * 1000);
 });
 
+test("focused usage crossing each 20-minute milestone prompts only once", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({
+      dailyUsage: {
+        date: localDateKey(),
+        sites: { "example.com": 20 * 60 * 1000 - 1000 }
+      }
+    })
+  );
+
+  const first = await context.handleDailyUsageUpdate(7, "news.example.com", 1000);
+  const duplicate = await context.handleDailyUsageUpdate(7, "example.com", 1000);
+
+  assert.equal(first.usageReminder.site, "example.com");
+  assert.equal(first.usageReminder.milestoneMinutes, 20);
+  assert.equal(duplicate.usageReminder, null);
+  assert.equal(state.localData.usageReminderMilestones.sites["example.com"], 1);
+
+  state.localData.dailyUsage.sites["example.com"] = 40 * 60 * 1000 - 1000;
+  const second = await context.handleDailyUsageUpdate(7, "example.com", 1000);
+
+  assert.equal(second.usageReminder.milestoneMinutes, 40);
+  assert.equal(state.localData.usageReminderMilestones.sites["example.com"], 2);
+});
+
+test("existing usage is baselined so an upgrade does not show a retroactive reminder", async () => {
+  const config = baseConfig({
+    dailyUsage: {
+      date: localDateKey(),
+      sites: { "example.com": 25 * 60 * 1000 }
+    }
+  });
+  delete config.usageReminderMilestones;
+  const { context, state } = await loadBackground(config);
+
+  const response = await context.handleDailyUsageUpdate(7, "example.com", 1000);
+
+  assert.equal(response.usageReminder, null);
+  assert.equal(state.localData.usageReminderMilestones.sites["example.com"], 1);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 25 * 60 * 1000 + 1000);
+});
+
 test("wait sessions always expire at the next local midnight", async () => {
   const { context } = await loadBackground(baseConfig());
   const createdAt = new Date(2026, 7, 31, 10, 15, 0, 0).getTime();
@@ -328,6 +371,10 @@ test("midnight resets daily state even when there are no open sessions", async (
       },
       dailyLimitCooldowns: {
         "example.com": tomorrowMs + 60 * 60 * 1000
+      },
+      usageReminderMilestones: {
+        date: localDateKey(),
+        sites: { "example.com": 2 }
       }
     })
   );
@@ -343,6 +390,8 @@ test("midnight resets daily state even when there are no open sessions", async (
   assert.equal(state.localData.dailyLimitUsageOffsets.date, localDateKey(tomorrow));
   assert.equal(Object.keys(state.localData.dailyLimitUsageOffsets.sites).length, 0);
   assert.equal(Object.keys(state.localData.dailyLimitCooldowns).length, 0);
+  assert.equal(state.localData.usageReminderMilestones.date, localDateKey(tomorrow));
+  assert.equal(Object.keys(state.localData.usageReminderMilestones.sites).length, 0);
 });
 
 test("a per-site cooldown starts at the limit and resets usage when it expires", async () => {
