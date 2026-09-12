@@ -96,9 +96,14 @@
 
     <section class="sites-section">
       <h2>Tracked Sites</h2>
-      <p class="sites-help">Usage resets at midnight · limits are optional</p>
-      <button id="add-current-btn" class="add-current-btn" style="display: none"></button>
+      <p class="sites-help">Usage resets at midnight · site waits and limits are optional</p>
       <ul id="site-list" class="site-list"></ul>
+      <label class="site-wait-option add-site-wait-option">
+        <input type="checkbox" id="add-site-wait" checked>
+        <span>Require site wait for new sites</span>
+      </label>
+      <p class="sites-help">Turn off to track usage and use daily locks or limits without a wait.</p>
+      <button id="add-current-btn" class="add-current-btn" style="display: none"></button>
       <form id="add-site-form" class="add-site-form">
         <input type="text" id="site-input" placeholder="example.com" autocomplete="off">
         <button type="submit" id="add-site-btn">+</button>

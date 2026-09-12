@@ -165,6 +165,7 @@ function createDocument() {
     "site-input": "input",
     "add-current-btn": "button",
     "add-site-btn": "button",
+    "add-site-wait": "input",
     "pending-config-section": "section",
     "pending-config-hover-target": "div",
     "pending-config-cancel": "button",
@@ -175,7 +176,7 @@ function createDocument() {
     "enabled-toggle", "delay-input", "settings-delay-input", "moving-target-toggle",
     "cooldown-status", "cooldown-btn", "daily-lock-toggle", "daily-lock-start",
     "daily-lock-end", "daily-lock-status", "site-list", "add-site-form",
-    "site-input", "add-current-btn", "add-site-btn", "pending-config-section",
+    "site-input", "add-current-btn", "add-site-btn", "add-site-wait", "pending-config-section",
     "pending-config-title", "pending-config-timer", "pending-config-hover-target",
     "pending-config-cancel", "confirm-dialog", "confirm-dialog-title",
     "confirm-dialog-message", "confirm-dialog-submit"
@@ -183,6 +184,7 @@ function createDocument() {
   const elements = Object.fromEntries(
     ids.map((id) => [id, new FakeElement(tagById[id] || "div", id)])
   );
+  elements["add-site-wait"].checked = true;
   const cooldownSection = new FakeElement("section");
   cooldownSection.className = "cooldown-section";
 
@@ -513,4 +515,53 @@ test("daily-limit policies and lock schedules use their security direction after
   );
   assert.equal(lastPendingChange(weakerSchedule)?.type, "changeDailyLockSchedule");
   assert.equal(weakerSchedule.elements["pending-config-section"].hidden, false);
+});
+
+test("both add-site actions can track a site without requiring a wait", async () => {
+  for (const [id, event, domain] of [
+    ["add-site-form", "submit", "social.example"],
+    ["add-current-btn", "click", "current.example"]
+  ]) {
+    const environment = await loadPopup();
+    await runConfirmedAction(environment, environment.elements[id], event, () => {
+      environment.elements["site-input"].value = domain;
+      environment.elements["add-site-wait"].checked = false;
+    });
+    assert.ok(environment.localData.sites.includes(domain));
+    assert.equal(environment.localData.siteWaitEnabled[domain], false);
+    assert.equal(lastPendingChange(environment), undefined);
+  }
+});
+
+test("site waits default on and disabling one requires confirmation and a settings hold", async () => {
+  const environment = await loadPopup();
+  const input = environment.elements["site-list"].querySelector(".site-wait-input");
+  assert.equal(input.checked, true);
+  await runConfirmedAction(environment, input, "change", () => { input.checked = false; });
+  assert.equal(lastPendingChange(environment)?.type, "disableSiteWait");
+  assert.equal(lastPendingChange(environment)?.site, "example.com");
+  assert.equal(environment.localData.siteWaitEnabled, undefined);
+  assert.equal(environment.elements["add-site-wait"].disabled, true);
+});
+
+test("enabling a site wait applies after confirmation without a settings hold", async () => {
+  const environment = await loadPopup({ siteWaitEnabled: { "example.com": false } });
+  const input = environment.elements["site-list"].querySelector(".site-wait-input");
+  assert.equal(input.checked, false);
+  await runConfirmedAction(environment, input, "change", () => { input.checked = true; });
+  assert.equal(environment.localData.siteWaitEnabled["example.com"], undefined);
+  assert.equal(lastPendingChange(environment), undefined);
+  assert.equal(environment.elements["site-list"].querySelector(".site-wait-input").checked, true);
+});
+
+test("canceling a site wait change preserves its setting", async () => {
+  const environment = await loadPopup();
+  const input = environment.elements["site-list"].querySelector(".site-wait-input");
+  input.checked = false;
+  const action = input.dispatch("change");
+  await environment.elements["confirm-dialog"].close("cancel");
+  await action;
+  assert.equal(input.checked, true);
+  assert.equal(lastPendingChange(environment), undefined);
+  assert.equal(environment.storageSets.length, 0);
 });

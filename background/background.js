@@ -5,6 +5,7 @@ const dailyLockApi = globalThis.AirlockDailyLock;
 const DEFAULT_CONFIG = {
   enabled: true,
   sites: [],
+  siteWaitEnabled: {},
   delayMinutes: 1,
   settingsDelayMinutes: 1,
   movingTargetEnabled: false,
@@ -188,6 +189,7 @@ async function readConfig() {
   const result = await browser.storage.local.get([
     "enabled",
     "sites",
+    "siteWaitEnabled",
     "delayMinutes",
     "settingsDelayMinutes",
     "movingTargetEnabled",
@@ -202,6 +204,7 @@ async function readConfig() {
   return {
     enabled: result.enabled !== false,
     sites: result.sites || [],
+    siteWaitEnabled: normalizeSiteWaitEnabled(result.siteWaitEnabled, result.sites || []),
     delayMinutes: delayMinutes,
     settingsDelayMinutes: clampDelayMinutes(
       result.settingsDelayMinutes || delayMinutes
@@ -232,6 +235,16 @@ async function getConfig() {
 
 function isDomainTracked(hostname, sites) {
   return getTrackedSite(hostname, sites) !== null;
+}
+
+function normalizeSiteWaitEnabled(value, sites) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(sites.filter((site) => value[site] === false).map((site) => [site, false]));
+}
+
+function requiresSiteWait(domain, config) {
+  const site = getTrackedSite(domain, config.sites);
+  return site !== null && config.siteWaitEnabled[site] !== false;
 }
 
 function getTrackedSite(hostname, sites) {
@@ -767,7 +780,7 @@ async function updateBadge() {
       !s.completed &&
       s.remainingMs > 0 &&
       config.enabled &&
-      isDomainTracked(s.domain, config.sites)
+      requiresSiteWait(s.domain, config)
   ).length;
 
   if (activeCount > 0) {
@@ -799,6 +812,10 @@ async function schedulePendingConfigChange(pending) {
 }
 
 function describePendingConfigChange(pending) {
+  if (pending.type === "disableSiteWait") {
+    return "Turning off site wait for " + pending.site;
+  }
+
   if (pending.type === "removeSite") {
     return "Removing " + pending.site;
   }
@@ -886,6 +903,20 @@ async function startPendingConfigChange(change) {
     pending = {
       ...pendingBase,
       type: "disableMovingTarget",
+      remainingMs: waitMinutes * MINUTE_MS
+    };
+  } else if (change.type === "disableSiteWait") {
+    const site = String(change.site || "").trim().toLowerCase();
+    if (!site || !config.sites.includes(site)) {
+      return { ok: false, reason: "site-not-tracked", pending: null };
+    }
+    if (config.siteWaitEnabled[site] === false) {
+      return { ok: true, applied: true, pending: null };
+    }
+    pending = {
+      ...pendingBase,
+      type: "disableSiteWait",
+      site: site,
       remainingMs: waitMinutes * MINUTE_MS
     };
   } else if (change.type === "removeSite") {
@@ -1171,9 +1202,16 @@ async function applyPendingConfigChange(pending) {
     if (config.movingTargetEnabled) {
       await browser.storage.local.set({ movingTargetEnabled: false });
     }
+  } else if (pending.type === "disableSiteWait" && config.sites.includes(pending.site)) {
+    await browser.storage.local.set({
+      siteWaitEnabled: { ...config.siteWaitEnabled, [pending.site]: false }
+    });
+    await reconcileExpiredSessions();
   } else if (pending.type === "removeSite") {
     const nextSites = config.sites.filter((site) => site !== pending.site);
     const nextDailyLimits = { ...config.dailyLimits };
+    const nextSiteWaitEnabled = { ...config.siteWaitEnabled };
+    delete nextSiteWaitEnabled[pending.site];
     const nextPolicies = { ...config.dailyLimitPolicies };
     const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
     const usageOffsets = await readDailyLimitUsageOffsets();
@@ -1184,6 +1222,7 @@ async function applyPendingConfigChange(pending) {
     delete usageOffsets.sites[pending.site];
     await browser.storage.local.set({
       sites: nextSites,
+      siteWaitEnabled: nextSiteWaitEnabled,
       dailyLimits: nextDailyLimits,
       dailyLimitPolicies: nextPolicies,
       dailyLimitCooldowns: nextCooldowns,
@@ -1272,6 +1311,10 @@ async function reconcileExpiredSessions() {
   const now = Date.now();
 
   for (const { key, tabId, session } of sessions) {
+    if (!requiresSiteWait(session.domain, config)) {
+      await removeSession(tabId);
+      continue;
+    }
     let currentSession = session;
 
     const createdAt = currentSession.createdAt || now;
@@ -1361,7 +1404,7 @@ if (browser.alarms) {
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
 
-  if (changes.enabled || changes.sites || changes.delayMinutes) {
+  if (changes.enabled || changes.sites || changes.siteWaitEnabled || changes.delayMinutes) {
     reconcileExpiredSessions().catch((error) => {
       console.warn("[Airlock] Failed to reconcile expired sessions:", error);
     });
@@ -1370,6 +1413,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   if (
     changes.enabled ||
     changes.sites ||
+    changes.siteWaitEnabled ||
     changes.dailyLimits ||
     changes.dailyLimitPolicies ||
     changes.dailyLimitCooldowns ||
@@ -1563,6 +1607,11 @@ async function handleContentReady(tabId, domain) {
       usedMs: dailyLimitState.usedMs,
       active: active
     };
+  }
+
+  if (!requiresSiteWait(domain, config)) {
+    await removeSession(tabId);
+    return addDailyLimitMetadata({ type: "NO_OVERLAY", active: active }, dailyLimitState);
   }
 
   let session = await getSession(tabId);

@@ -17,6 +17,7 @@ const addSiteForm = document.getElementById("add-site-form");
 const siteInput = document.getElementById("site-input");
 const addCurrentBtn = document.getElementById("add-current-btn");
 const addSiteBtn = document.getElementById("add-site-btn");
+const addSiteWait = document.getElementById("add-site-wait");
 const pendingConfigSection = document.getElementById("pending-config-section");
 const pendingConfigTitle = document.getElementById("pending-config-title");
 const pendingConfigTimer = document.getElementById("pending-config-timer");
@@ -35,6 +36,7 @@ confirmDialog.addEventListener("click", (event) => {
 });
 
 let sites = [];
+let siteWaitEnabled = {};
 let delayMinutes = 1;
 let settingsDelayMinutes = 1;
 let dailyLimits = {};
@@ -59,6 +61,7 @@ let pendingConfigTimerText = null;
 browser.storage.local.get([
   "enabled",
   "sites",
+  "siteWaitEnabled",
   "delayMinutes",
   "settingsDelayMinutes",
   "movingTargetEnabled",
@@ -99,6 +102,7 @@ browser.storage.local.get([
   renderCooldown();
 
   sites = result.sites || [];
+  siteWaitEnabled = normalizeSiteWaitEnabled(result.siteWaitEnabled);
   renderSites();
   refreshPendingConfigChange();
 });
@@ -114,18 +118,7 @@ browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
 });
 
 addCurrentBtn.addEventListener("click", async () => {
-  if (pendingConfigChange) return;
-  if (!currentDomain || sites.includes(currentDomain)) return;
-  if (!(await confirmInPopup({
-    title: "Track " + currentDomain + "?",
-    message: "Airlock will add its configured restrictions to this site.",
-    confirmLabel: "Track site"
-  }))) return;
-
-  sites.push(currentDomain);
-  sites.sort();
-  browser.storage.local.set({ sites: sites });
-  renderSites();
+  await addTrackedSite(currentDomain);
 });
 
 // --- Toggle ---
@@ -529,6 +522,21 @@ function renderSites() {
     const settings = document.createElement("div");
     settings.className = "site-settings";
 
+    const waitGroup = document.createElement("label");
+    waitGroup.className = "site-wait-option";
+    waitGroup.title = "Require the site-entry countdown; usage tracking, locks, and limits apply either way";
+    const waitInput = document.createElement("input");
+    waitInput.type = "checkbox";
+    waitInput.className = "site-wait-input";
+    waitInput.checked = siteWaitEnabled[site] !== false;
+    waitInput.setAttribute("aria-label", "Require site wait for " + site);
+    waitInput.addEventListener("change", () => changeSiteWait(site, waitInput));
+    const waitLabel = document.createElement("span");
+    waitLabel.textContent = "Site wait";
+    waitGroup.appendChild(waitInput);
+    waitGroup.appendChild(waitLabel);
+    settings.appendChild(waitGroup);
+
     const limitGroup = document.createElement("label");
     limitGroup.className = "site-limit-group";
     limitGroup.title = "Daily time limit in minutes; leave blank for no limit";
@@ -627,6 +635,27 @@ function renderSites() {
 
   renderAddCurrentButton();
   renderCooldown();
+}
+
+async function changeSiteWait(site, input) {
+  const nextEnabled = input.checked;
+  input.checked = siteWaitEnabled[site] !== false;
+  if (pendingConfigChange || nextEnabled === input.checked) return;
+  if (!(await confirmInPopup({
+    title: (nextEnabled ? "Turn on" : "Turn off") + " site wait for " + site + "?",
+    message: nextEnabled
+      ? "This site will require the configured countdown before entry."
+      : "Usage tracking, daily locks, and limits will still apply. The settings hold is required before the site wait is removed.",
+    confirmLabel: "Continue"
+  }))) return;
+
+  if (!nextEnabled) {
+    await startPendingConfigChange({ type: "disableSiteWait", site: site });
+    return;
+  }
+  delete siteWaitEnabled[site];
+  await browser.storage.local.set({ siteWaitEnabled: siteWaitEnabled });
+  renderSites();
 }
 
 async function changeDailyLimitPolicy(site, nextValue) {
@@ -776,17 +805,28 @@ addSiteForm.addEventListener("submit", async (e) => {
     siteInput.value = "";
     return;
   }
+  if (await addTrackedSite(domain)) siteInput.value = "";
+});
+
+async function addTrackedSite(domain) {
+  if (pendingConfigChange || !domain || sites.includes(domain)) return false;
+  const waitEnabled = addSiteWait.checked;
   if (!(await confirmInPopup({
     title: "Track " + domain + "?",
-    message: "Airlock will add its configured restrictions to this site.",
+    message: waitEnabled
+      ? "Airlock will track usage and apply its site wait, daily locks, and configured limits."
+      : "Airlock will track usage and apply daily locks and configured limits without a site-entry wait.",
     confirmLabel: "Track site"
-  }))) return;
+  }))) return false;
 
   sites.push(domain);
-  browser.storage.local.set({ sites: sites });
+  sites.sort();
+  if (waitEnabled) delete siteWaitEnabled[domain];
+  else siteWaitEnabled[domain] = false;
+  await browser.storage.local.set({ sites: sites, siteWaitEnabled: siteWaitEnabled });
   renderSites();
-  siteInput.value = "";
-});
+  return true;
+}
 
 pendingConfigCancel.addEventListener("click", () => {
   browser.runtime.sendMessage({ type: "CANCEL_PENDING_CONFIG_CHANGE" }).then((response) => {
@@ -875,6 +915,11 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     renderSites();
   }
 
+  if (changes.siteWaitEnabled) {
+    siteWaitEnabled = normalizeSiteWaitEnabled(changes.siteWaitEnabled.newValue);
+    renderSites();
+  }
+
   if (changes.dailyLimits) {
     dailyLimits = normalizeDailyLimits(changes.dailyLimits.newValue);
     renderSites();
@@ -912,6 +957,11 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     renderSites();
   }
 });
+
+function normalizeSiteWaitEnabled(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([, enabled]) => enabled === false));
+}
 
 function normalizeDelayMinutes(value) {
   let minutes = parseInt(value, 10);
@@ -1061,6 +1111,7 @@ function setControlsLocked(locked) {
   dailyLockEndInput.disabled = locked;
   siteInput.disabled = locked;
   addSiteBtn.disabled = locked;
+  addSiteWait.disabled = locked;
   addCurrentBtn.disabled = locked;
 
   siteList.querySelectorAll("button").forEach((btn) => {
@@ -1100,6 +1151,10 @@ function renderPendingConfigChange() {
 }
 
 function getPendingConfigTitle(pending) {
+  if (pending.type === "disableSiteWait") {
+    return "Turning off site wait for " + pending.site;
+  }
+
   if (pending.type === "removeSite") {
     return "Removing " + pending.site;
   }

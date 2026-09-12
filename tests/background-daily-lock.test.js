@@ -726,3 +726,83 @@ test("legacy settings migrate into separate site and settings waits", async () =
   assert.equal(state.localData.requireHoverTarget, undefined);
   assert.equal(state.localData.resetHours, undefined);
 });
+
+test("sites with wait disabled track usage across visits and subdomains without timer sessions", async () => {
+  const { context, state } = await loadBackground(baseConfig({
+    siteWaitEnabled: { "example.com": false }
+  }));
+  for (const [tabId, domain] of [[7, "example.com"], [7, "example.com"], [8, "news.example.com"]]) {
+    assert.equal((await context.handleContentReady(tabId, domain)).type, "NO_OVERLAY");
+  }
+  assert.deepEqual(state.sessionData, {});
+  const usage = await context.handleDailyUsageUpdate(7, "news.example.com", 1000);
+  assert.equal(usage.ok, true);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 1000);
+});
+
+test("sites with wait disabled still enforce locks, cooldowns, and daily limits", async () => {
+  const window = activeWindowAroundNow();
+  const { context, state } = await loadBackground(baseConfig({
+    siteWaitEnabled: { "example.com": false },
+    dailyLockEnabled: true,
+    dailyLockStart: window.start,
+    dailyLockEnd: window.end,
+    dailyLimits: { "example.com": 1 }
+  }));
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_DAILY_LOCK");
+  state.localData.dailyLockEnabled = false;
+  const open = await context.handleContentReady(7, "example.com");
+  assert.equal(open.type, "NO_OVERLAY");
+  assert.equal(open.dailyLimitMinutes, 1);
+  state.localData.dailyUsage.sites["example.com"] = 59000;
+  assert.equal((await context.handleDailyUsageUpdate(7, "example.com", 1000)).reached, true);
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_DAILY_LIMIT");
+  await context.startCooldown();
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_COOLDOWN");
+  state.localData.cooldownUntil = null;
+  state.localData.dailyUsage.sites = {};
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "NO_OVERLAY");
+});
+
+test("disabling a site's wait is guarded and enabling it again creates a fresh wait", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_OVERLAY");
+  const pending = await context.startPendingConfigChange({ type: "disableSiteWait", site: "example.com" });
+  assert.equal(pending.applied, false);
+  await context.advancePendingConfigChange(30000);
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_OVERLAY");
+  await context.advancePendingConfigChange(30000);
+  assert.equal(state.localData.siteWaitEnabled["example.com"], false);
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "NO_OVERLAY");
+  assert.deepEqual(state.sessionData, {});
+  assert.ok(state.tabMessages.some(({ message }) => message.type === "RECHECK_CONFIG"));
+  state.localData.siteWaitEnabled = {};
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_OVERLAY");
+});
+
+test("midnight never resets a timer for a site whose wait is disabled", async () => {
+  const { context, state } = await loadBackground(baseConfig({ siteWaitEnabled: { "example.com": false } }));
+  state.sessionData.session_7 = context.createTimerSession("example.com", 1, Date.now() - 86400000);
+  state.tabMessages.length = 0;
+  await context.reconcileMidnightReset();
+  assert.deepEqual(state.sessionData, {});
+  assert.equal(state.tabMessages.some(({ message }) => message.type === "RESET_TIMER"), false);
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "NO_OVERLAY");
+});
+
+test("wait preferences default on and follow the most specific tracked domain", async () => {
+  const { context } = await loadBackground(baseConfig({
+    sites: ["example.com", "news.example.com", "other.example"],
+    siteWaitEnabled: { "example.com": false, "other.example": "false" }
+  }));
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "NO_OVERLAY");
+  assert.equal((await context.handleContentReady(7, "news.example.com")).type, "SHOW_OVERLAY");
+  assert.equal((await context.handleContentReady(7, "other.example")).type, "SHOW_OVERLAY");
+});
+
+test("removing a site clears its wait preference", async () => {
+  const { context, state } = await loadBackground(baseConfig({ siteWaitEnabled: { "example.com": false } }));
+  await context.startPendingConfigChange({ type: "removeSite", site: "example.com" });
+  await context.advancePendingConfigChange(60000);
+  assert.equal(state.localData.siteWaitEnabled["example.com"], undefined);
+});

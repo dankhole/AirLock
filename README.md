@@ -5,14 +5,14 @@ A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional f
 ## How It Works
 
 1. You configure separate site-entry and settings-change hover delays, a list of websites, optional per-site daily limits, optional moving-target motion, and an optional daily lock window via the popup
-2. When any tab navigates to a tracked site, a fullscreen overlay appears with a countdown timer and breathing focus target
+2. When any tab navigates to a tracked site with **Site wait** enabled, a fullscreen overlay appears with a countdown timer and breathing focus target
 3. The timer **pauses** when you switch tabs, switch windows, or minimize the browser
 4. The timer **resumes** when you return to the tab and keep the pointer on the overlay target
 5. When the countdown reaches zero, a "Continue" button appears to dismiss the overlay
 6. Refreshing the page resumes the existing timer (doesn't reset it)
 7. Opening a new tab to the same site starts a fresh timer
 8. Navigating within a site after completing the timer does not re-trigger it again that day
-9. At local midnight, usage counters reset and tracked tabs require a fresh wait
+9. At local midnight, usage counters reset and tracked tabs with **Site wait** enabled require a fresh wait
 10. Every security-affecting settings change asks for confirmation; weaker changes also require the independently configured settings hold before applying
 11. Settings holds only count down while the popup is open and the settings hover target is active
 12. During the daily lock window, tracked sites show a non-dismissible lock overlay until the configured local end time
@@ -27,6 +27,8 @@ After confirmation, stronger settings apply immediately: turning Airlock or the 
 Weaker settings require both confirmation and the settings hold: turning Airlock or the moving target off, removing a site or daily limit, reducing the site wait or settings hold, increasing the daily allowance, ending a cooldown, disabling a daily lock, changing its schedule in a way that removes any currently locked time, switching from a hard block to a per-site cooldown, or shortening that cooldown. Changing a disabled daily lock's start or end time is neutral and applies immediately.
 
 Domain matching: entering `reddit.com` will match `reddit.com`, `www.reddit.com`, `old.reddit.com`, etc.
+
+To track a website or apply time-of-day restrictions without a countdown, uncheck **Require site wait for new sites** before adding it with either add-site action. For an existing site, uncheck its **Site wait** checkbox and complete the settings hold. Usage tracking, daily locks, daily limits, and cooldowns still apply. Existing sites keep their waits by default; turning a wait back on applies immediately after confirmation.
 
 ## Build
 
@@ -97,6 +99,14 @@ After making source changes, run `npm run build` and reload the extension.
 - Verify that matching tabs show a non-dismissible limit overlay and that the popup reports today's usage
 - Verify that unfocused, hidden, waiting, and scheduled-lock time does not count
 - Raising or removing a limit uses the same guarded settings countdown as other less-restrictive changes
+
+### Tracking without a site wait
+- Uncheck **Require site wait for new sites**, then add a site manually or with the current-site button
+- Visit, refresh, or open a new tab to that site and verify no countdown appears while focused usage still accumulates
+- Enable a daily lock or daily limit and verify it still blocks the site; after unlocking, no countdown should appear
+- Turn off **Site wait** for an existing site and verify the current wait remains until the settings hold completes
+- Turn **Site wait** back on and verify entry requires a fresh countdown
+- Leave a site with its wait off open across midnight and verify usage resets without a countdown
 
 ### Cooldown
 - Click **Start 1 hour** and verify every tracked site immediately shows a non-dismissible cooldown overlay

@@ -453,6 +453,24 @@ body {
   font-size: 11px;
 }
 
+.site-wait-option {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #555;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.site-wait-option input {
+  accent-color: #5b8def;
+}
+
+.add-site-wait-option {
+  margin: 10px 0 5px;
+  font-size: 12px;
+}
+
 /* Add Current Site Button */
 .add-current-btn {
   width: 100%;
