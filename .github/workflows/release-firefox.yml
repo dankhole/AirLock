@@ -1,0 +1,51 @@
+name: Release Firefox
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firefox-amo-release
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Validate release version and package Firefox
+        run: npm run package:firefox
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NOTES: ${{ github.event.release.body }}
+      - name: Save the validated package
+        uses: actions/upload-artifact@v4
+        with:
+          name: firefox-package
+          path: store/firefox-addon-*.zip
+          if-no-files-found: error
+      - name: Submit update to Mozilla Add-ons
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.AMO_JWT_ISSUER }}
+          WEB_EXT_API_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          if [ -z "$WEB_EXT_API_KEY" ] || [ -z "$WEB_EXT_API_SECRET" ]; then
+            echo 'Configure AMO_JWT_ISSUER and AMO_JWT_SECRET in repository Actions secrets.'
+            exit 1
+          fi
+          npm run submit:firefox
+      - name: Report submission
+        run: echo 'Firefox update submitted to AMO. Publication remains subject to Mozilla review; check the AMO developer dashboard for status.' >> "$GITHUB_STEP_SUMMARY"

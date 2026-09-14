@@ -1,9 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Airlock",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "Add intentional friction before accessing distracting websites.",
-  "permissions": ["storage", "activeTab", "alarms"],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "alarms"
+  ],
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
@@ -18,12 +22,19 @@
     "128": "icons/icon-128.png"
   },
   "background": {
-    "scripts": ["shared/daily-lock.js", "background/background.js"]
+    "scripts": [
+      "shared/daily-lock.js",
+      "background/background.js"
+    ]
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content/content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/content.js"
+      ],
       "run_at": "document_start"
     }
   ],
@@ -32,7 +43,9 @@
       "id": "airlock@dankhole",
       "strict_min_version": "142.0",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       }
     }
   }

@@ -1,6 +1,6 @@
 {
   "name": "airlock",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "private": true,
   "description": "Add intentional friction before accessing distracting websites.",
   "license": "GPL-3.0-only",
@@ -8,9 +8,13 @@
     "build": "node scripts/build.js",
     "build:chrome": "node scripts/build.js chrome",
     "build:firefox": "node scripts/build.js firefox",
-    "test": "node --test"
+    "test": "node --test",
+    "release:version": "node scripts/release.js bump",
+    "package:firefox": "npm run build && node scripts/release.js prepare && web-ext lint --source-dir store/firefox-source --no-config-discovery && web-ext build --source-dir store/firefox-source --artifacts-dir store --filename firefox-addon-{version}.zip --overwrite-dest --no-config-discovery",
+    "submit:firefox": "web-ext sign --source-dir store/firefox-source --artifacts-dir store --channel listed --amo-metadata store/amo-metadata.json --approval-timeout 0 --no-input --no-config-discovery"
   },
   "devDependencies": {
+    "web-ext": "10.6.0",
     "webextension-polyfill": "^0.12.0"
   }
 }

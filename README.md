@@ -45,16 +45,40 @@ The build script handles browser differences automatically:
 
 ## Firefox AMO Package
 
-For official Firefox uploads, package the authored source files directly instead of using `dist/firefox`:
+Use Node.js 22 or later. To validate and package an official Firefox upload:
 
 ```sh
-mkdir -p store
-rm -f store/firefox-addon-1.0.12.zip
-zip -j store/firefox-addon-1.0.12.zip firefox/manifest.json
-zip -r store/firefox-addon-1.0.12.zip background content popup shared icons -x '*.DS_Store'
+npm ci
+npm run package:firefox
 ```
 
-This keeps the submitted Firefox package free of generated extension files. The AMO generated-code question can be answered "No" when using this package.
+This builds both browsers, verifies that both manifests and npm version files agree, copies the authored Firefox files into `store/firefox-source/`, runs Mozilla's `web-ext lint`, and creates `store/firefox-addon-<version>.zip`. The ZIP has `manifest.json` at its root. Hidden files are excluded and the authored source files are preserved byte-for-byte. The AMO generated-code question can be answered "No" when using this package.
+
+## Automated Firefox releases
+
+[Release Firefox](.github/workflows/release-firefox.yml) submits an update to the existing `airlock@dankhole` AMO listing when a stable GitHub release is published. Drafts and prereleases do not upload. The workflow runs tests and packaging, requires a tag of exactly `v<package.json version>`, saves the validated ZIP as a workflow artifact, and includes the GitHub release body as AMO release notes.
+
+### One-time setup
+
+1. Merge the workflow and release tooling into the repository.
+2. Generate [AMO API credentials](https://addons.mozilla.org/developers/addon/api/key/) using the Mozilla account that owns Airlock.
+3. Under GitHub **Settings → Secrets and variables → Actions**, add repository secrets `AMO_JWT_ISSUER` (JWT issuer/API key) and `AMO_JWT_SECRET` (JWT secret/API secret). Enter the credentials directly into GitHub's secret fields.
+
+### Publish a version
+
+```sh
+npm run release:version -- patch  # also accepts minor or major
+npm test
+npm run package:firefox
+```
+
+The version command updates `package.json`, `package-lock.json`, `manifest.json`, and `firefox/manifest.json` together. Commit and push those changes with the release's source changes, then publish a GitHub release targeting that commit with the matching tag (for example, `v1.0.13`) and release notes. The workflow starts automatically; pushing a commit or tag alone does not submit an update.
+
+Check **Actions → Release Firefox** for the package and submission result. A successful workflow means the update was submitted; publication still depends on Mozilla's validation and review. The workflow does not wait for review or download a signed XPI for listed submissions. See [Mozilla's submission reference](https://extensionworkshop.com/documentation/develop/web-ext-command-reference/#web-ext-sign).
+
+If a run fails after upload, check the AMO developer dashboard before rerunning: the version may already exist. If AMO accepted it, do not resubmit that version. If it did not, fix the cause and rerun; source changes require a new version and release tag.
+
+For a local upload, first run `npm run package:firefox`, supply `WEB_EXT_API_KEY` and `WEB_EXT_API_SECRET` through your local secret manager/environment, then run `npm run submit:firefox`. This command uploads the staged package to the public listing immediately.
 
 ## Install
 
