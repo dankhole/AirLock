@@ -1,6 +1,6 @@
 {
   "name": "airlock",
-  "version": "1.0.13",
+  "version": "1.1.0",
   "private": true,
   "description": "Add intentional friction before accessing distracting websites.",
   "license": "GPL-3.0-only",
@@ -8,13 +8,20 @@
     "build": "node scripts/build.js",
     "build:chrome": "node scripts/build.js chrome",
     "build:firefox": "node scripts/build.js firefox",
-    "test": "node --test",
+    "test": "node --test tests/*.test.js tests/contracts/*.test.js",
     "release:version": "node scripts/release.js bump",
     "package:firefox": "npm run build && node scripts/release.js prepare && web-ext lint --source-dir store/firefox-source --no-config-discovery && web-ext build --source-dir store/firefox-source --artifacts-dir store --filename firefox-addon-{version}.zip --overwrite-dest --no-config-discovery",
-    "submit:firefox": "web-ext sign --source-dir store/firefox-source --artifacts-dir store --channel listed --amo-metadata store/amo-metadata.json --approval-timeout 0 --no-input --no-config-discovery"
+    "submit:firefox": "web-ext sign --source-dir store/firefox-source --artifacts-dir store --channel listed --amo-metadata store/amo-metadata.json --approval-timeout 0 --no-input --no-config-discovery",
+    "test:browser:chromium": "node --test browser-tests/chromium.test.js",
+    "test:browser:firefox": "node --test browser-tests/firefox.test.js",
+    "test:browser": "npm run test:browser:chromium && npm run test:browser:firefox"
   },
   "devDependencies": {
-    "web-ext": "10.6.0",
+    "geckodriver": "7.0.0",
+    "jsdom": "26.1.0",
+    "playwright": "1.63.0",
+    "selenium-webdriver": "4.49.0",
+    "web-ext": "10.8.0",
     "webextension-polyfill": "^0.12.0"
   }
 }

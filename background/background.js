@@ -2,6 +2,11 @@
 // Manages timer sessions, focus tracking, badge, and message coordination.
 
 const dailyLockApi = globalThis.AirlockDailyLock;
+const controlsApi = globalThis.AirlockControls;
+let settingsCommandQueue = Promise.resolve();
+let pendingLease = null;
+let pendingAlarmCleared = false;
+const progressCursors = new Map();
 const DEFAULT_CONFIG = {
   enabled: true,
   sites: [],
@@ -14,7 +19,8 @@ const DEFAULT_CONFIG = {
   cooldownUntil: null,
   dailyLockEnabled: false,
   dailyLockStart: dailyLockApi.DEFAULT_START,
-  dailyLockEnd: dailyLockApi.DEFAULT_END
+  dailyLockEnd: dailyLockApi.DEFAULT_END,
+  contentControls: controlsApi.getDefaults()
 };
 
 const PENDING_CONFIG_CHANGE_KEY = "pendingConfigChange";
@@ -22,6 +28,9 @@ const PENDING_CONFIG_CHANGE_ALARM = "airlock.pendingConfigChange";
 const MIDNIGHT_RESET_ALARM = "airlock.sessionReset";
 const DAILY_LOCK_BOUNDARY_ALARM = "airlock.dailyLockBoundary";
 const COOLDOWN_BOUNDARY_ALARM = "airlock.cooldownBoundary";
+const CONFIG_REVISION_KEY = "configRevision";
+const SETTINGS_LEASE_MS = 2500;
+const MAX_SETTINGS_TICK_MS = 1000;
 const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const MAX_DAILY_LIMIT_MINUTES = 24 * 60;
@@ -33,7 +42,10 @@ const USAGE_REMINDER_INTERVAL_MS = 20 * MINUTE_MS;
 // --- Initialization ---
 
 browser.runtime.onInstalled.addListener(async () => {
-  await migrateStoredConfig();
+  await enqueueSettingsCommand(async () => {
+    await expireCooldownInternal();
+    await migrateStoredConfig();
+  });
   await resetDailyStateIfNeeded();
   await reconcilePendingConfigChange();
   await reconcileExpiredSessions();
@@ -55,7 +67,11 @@ function getSessionKey(tabId) {
 
 async function reconcileStartupState() {
   try {
-    await migrateStoredConfig();
+    await enqueueSettingsCommand(async () => {
+      pendingLease = null;
+      await expireCooldownInternal();
+      await migrateStoredConfig();
+    });
     await resetDailyStateIfNeeded();
     await reconcilePendingConfigChange();
     await reconcileExpiredSessions();
@@ -87,9 +103,17 @@ async function migrateStoredConfig() {
     "cooldownUntil",
     "dailyLockEnabled",
     "dailyLockStart",
-    "dailyLockEnd"
+    "dailyLockEnd",
+    "contentControls",
+    CONFIG_REVISION_KEY
   ]);
+  const configBeforeMigration = await readConfig();
   const updates = {};
+  if (!Number.isSafeInteger(existing.configRevision) || existing.configRevision < 0) updates.configRevision = 0;
+  if (controlsApi.isSupported(existing.contentControls)) {
+    const contentControls = controlsApi.normalize(existing.contentControls);
+    if (!sameData(contentControls, existing.contentControls)) updates.contentControls = contentControls;
+  }
 
   if (existing.enabled === undefined) updates.enabled = DEFAULT_CONFIG.enabled;
   if (existing.sites === undefined) updates.sites = DEFAULT_CONFIG.sites;
@@ -100,8 +124,8 @@ async function migrateStoredConfig() {
   const settingsDelayMinutes = existing.settingsDelayMinutes === undefined
     ? (existing.guardMinutes === undefined
         ? delayMinutes
-        : clampDelayMinutes(existing.guardMinutes))
-    : clampDelayMinutes(existing.settingsDelayMinutes);
+        : clampSettingsDelayMinutes(existing.guardMinutes))
+    : clampSettingsDelayMinutes(existing.settingsDelayMinutes);
   if (existing.settingsDelayMinutes !== settingsDelayMinutes) {
     updates.settingsDelayMinutes = settingsDelayMinutes;
   }
@@ -111,7 +135,7 @@ async function migrateStoredConfig() {
   }
 
   const dailyLimits = normalizeDailyLimits(existing.dailyLimits, existing.sites || []);
-  if (JSON.stringify(existing.dailyLimits || {}) !== JSON.stringify(dailyLimits)) {
+  if (!sameData(existing.dailyLimits || {}, dailyLimits)) {
     updates.dailyLimits = dailyLimits;
   }
 
@@ -119,7 +143,7 @@ async function migrateStoredConfig() {
     existing.dailyLimitPolicies,
     existing.sites || []
   );
-  if (JSON.stringify(existing.dailyLimitPolicies || {}) !== JSON.stringify(dailyLimitPolicies)) {
+  if (!sameData(existing.dailyLimitPolicies || {}, dailyLimitPolicies)) {
     updates.dailyLimitPolicies = dailyLimitPolicies;
   }
 
@@ -127,7 +151,7 @@ async function migrateStoredConfig() {
     existing.dailyLimitCooldowns,
     existing.sites || []
   );
-  if (JSON.stringify(existing.dailyLimitCooldowns || {}) !== JSON.stringify(dailyLimitCooldowns)) {
+  if (!sameData(existing.dailyLimitCooldowns || {}, dailyLimitCooldowns)) {
     updates.dailyLimitCooldowns = dailyLimitCooldowns;
   }
 
@@ -170,6 +194,10 @@ async function migrateStoredConfig() {
     updates.dailyLockEnabled = dailyLockEnabled;
   }
 
+  if (Number.isSafeInteger(existing.configRevision) && existing.configRevision >= 0 &&
+      Object.keys(updates).some((key) => Object.prototype.hasOwnProperty.call(DEFAULT_CONFIG, key) && !sameData(configBeforeMigration[key], updates[key]))) {
+    updates.configRevision = existing.configRevision + 1;
+  }
   if (Object.keys(updates).length > 0) {
     await browser.storage.local.set(updates);
   }
@@ -198,7 +226,9 @@ async function readConfig() {
     "cooldownUntil",
     "dailyLockEnabled",
     "dailyLockStart",
-    "dailyLockEnd"
+    "dailyLockEnd",
+    "contentControls",
+    CONFIG_REVISION_KEY
   ]);
   const delayMinutes = clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes);
   return {
@@ -206,8 +236,8 @@ async function readConfig() {
     sites: result.sites || [],
     siteWaitEnabled: normalizeSiteWaitEnabled(result.siteWaitEnabled, result.sites || []),
     delayMinutes: delayMinutes,
-    settingsDelayMinutes: clampDelayMinutes(
-      result.settingsDelayMinutes || delayMinutes
+    settingsDelayMinutes: clampSettingsDelayMinutes(
+      result.settingsDelayMinutes === undefined ? delayMinutes : result.settingsDelayMinutes
     ),
     movingTargetEnabled: result.movingTargetEnabled === true,
     dailyLimits: normalizeDailyLimits(result.dailyLimits, result.sites || []),
@@ -224,7 +254,10 @@ async function readConfig() {
     dailyLockEnd: dailyLockApi.normalizeTimeOfDay(
       result.dailyLockEnd,
       DEFAULT_CONFIG.dailyLockEnd
-    )
+    ),
+    contentControls: controlsApi.isSupported(result.contentControls)
+      ? controlsApi.normalize(result.contentControls)
+      : result.contentControls
   };
 }
 
@@ -258,6 +291,11 @@ function clampDelayMinutes(value) {
   if (isNaN(minutes) || minutes < 1) minutes = 1;
   if (minutes > 600) minutes = 600;
   return minutes;
+}
+
+function clampSettingsDelayMinutes(value) {
+  // Preserve an explicitly disabled hold without weakening invalid stored values.
+  return value === 0 ? 0 : clampDelayMinutes(value);
 }
 
 function normalizeCooldownUntil(value, now = Date.now()) {
@@ -317,31 +355,6 @@ function normalizeDailyLimitCooldowns(value, sites) {
       .map(([site, until]) => [site, Number(until)])
       .filter(([site, until]) => trackedSites.has(site) && Number.isFinite(until) && until > 0)
   );
-}
-
-async function setDailyLimitPolicy(config, site, policy) {
-  const normalized = normalizeDailyLimitPolicy(policy);
-  const current = normalizeDailyLimitPolicy(config.dailyLimitPolicies[site]);
-  const nextPolicies = { ...config.dailyLimitPolicies };
-  const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
-  const nextCooldowns = { ...(storedCooldowns.dailyLimitCooldowns || {}) };
-
-  if (normalized.mode === "cooldown") {
-    nextPolicies[site] = normalized;
-    const activeCooldownUntil = Number(nextCooldowns[site]);
-    if (current.mode === "cooldown" && Number.isFinite(activeCooldownUntil)) {
-      const cooldownStartedAt = activeCooldownUntil - current.cooldownMinutes * MINUTE_MS;
-      nextCooldowns[site] = cooldownStartedAt + normalized.cooldownMinutes * MINUTE_MS;
-    }
-  } else {
-    delete nextPolicies[site];
-    delete nextCooldowns[site];
-  }
-
-  await browser.storage.local.set({
-    dailyLimitPolicies: nextPolicies,
-    dailyLimitCooldowns: nextCooldowns
-  });
 }
 
 function normalizeDailyLimits(value, sites) {
@@ -744,28 +757,54 @@ async function reconcileDailyLockBoundary() {
   await updateBadge();
 }
 
-async function reconcileCooldownBoundary() {
+async function expireCooldownInternal() {
+  const stored = await browser.storage.local.get("cooldownUntil");
+  if (stored.cooldownUntil === null || stored.cooldownUntil === undefined || normalizeCooldownUntil(stored.cooldownUntil)) return false;
+  const previousUntil = Number(stored.cooldownUntil);
+  const naturalExpiry = Number.isFinite(previousUntil) && previousUntil > 0;
   const config = await readConfig();
-  if (!config.cooldownUntil) {
-    const stored = await browser.storage.local.get("cooldownUntil");
-    if (stored.cooldownUntil !== null && stored.cooldownUntil !== undefined) {
-      await browser.storage.local.set({ cooldownUntil: null });
-    }
+  const previousConfig = { ...config, cooldownUntil: previousUntil };
+  const revision = await readConfigRevision();
+  let pending = await readPendingConfigChange();
+  if (pending && naturalExpiry && !pending.patch && legacyPendingMatches(pending, previousConfig)) {
+    const patch = legacyChangePatch(pending, previousConfig);
+    if (patch) pending = { ...pending, id: pending.id || createPendingId(), patch, baseRevision: revision,
+      baseConfig: previousConfig, remainingMs: getPendingRemainingMs(pending) };
   }
-
-  await reconcilePendingConfigChange();
-  await scheduleCooldownBoundaryAlarm();
-  await broadcastConfigRecheck();
-  await updateBadge();
+  const matchesPrevious = pending && naturalExpiry && pending.baseRevision === revision && sameData(pending.baseConfig, previousConfig);
+  let rebased = null;
+  if (matchesPrevious) {
+    const validated = validateConfigPatch(config, pending.patch);
+    // An end-only request is already satisfied. Other patches keep the exact
+    // proposed values and remaining engagement time across this system change.
+    if (!validated.reason && !sameData(config, validated.next)) rebased = { ...pending, baseRevision: revision + 1, baseConfig: config };
+  }
+  const updates = { cooldownUntil: null, configRevision: revision + 1 };
+  if (pending) updates[PENDING_CONFIG_CHANGE_KEY] = rebased;
+  await browser.storage.local.set(updates);
+  if (pending && !rebased) await clearPendingConfigChange();
+  return true;
 }
 
-async function startCooldown() {
-  const cooldownUntil = Date.now() + HOUR_MS;
-  await browser.storage.local.set({ cooldownUntil: cooldownUntil });
-  await scheduleCooldownBoundaryAlarm();
-  await broadcastConfigRecheck();
-  await updateBadge();
-  return { ok: true, cooldownUntil: cooldownUntil };
+async function reconcileCooldownBoundary() {
+  return enqueueSettingsCommand(async () => {
+    await expireCooldownInternal();
+    await reconcilePendingConfigChangeInternal();
+    await scheduleCooldownBoundaryAlarm();
+    await broadcastConfigRecheck();
+    await updateBadge();
+  });
+}
+
+async function startCooldown(sender) {
+  if (sender && !isSettingsSender(sender) && !isContentSender(sender)) return { ok: false, reason: "untrusted-sender" };
+  return enqueueSettingsCommand(async () => {
+    const config = await readConfig();
+    const cooldownUntil = Date.now() + HOUR_MS;
+    await commitConfig(config, { ...config, cooldownUntil });
+    await reconcilePendingConfigChangeInternal();
+    return { ...(await getSettingsSnapshot()), cooldownUntil };
+  });
 }
 
 // --- Badge ---
@@ -792,517 +831,442 @@ async function updateBadge() {
 }
 
 // --- Guarded Config Changes ---
+// A command owns all reads and writes through completion; internal helpers never
+// enqueue another command, so reconciliation cannot deadlock its caller.
+function enqueueSettingsCommand(operation) {
+  const result = settingsCommandQueue.then(operation);
+  settingsCommandQueue = result.catch(() => {});
+  return result;
+}
+
+function isSettingsSender(sender) {
+  if (!sender || (browser.runtime.id && sender.id !== browser.runtime.id)) return false;
+  const senderUrl = sender.url || (sender.tab && sender.tab.url);
+  if (typeof senderUrl !== "string") return false;
+  try {
+    const url = new URL(senderUrl);
+    url.search = "";
+    url.hash = "";
+    return ["popup/popup.html", "options/options.html"].some((path) => url.href === browser.runtime.getURL(path));
+  } catch { return false; }
+}
+
+function isContentSender(sender) {
+  if (!sender || !sender.tab || !Number.isInteger(sender.tab.id) || (sender.frameId !== undefined && sender.frameId !== 0)) return false;
+  if (browser.runtime.id && sender.id !== browser.runtime.id) return false;
+  try {
+    const url = new URL(sender.url || sender.tab.url);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch { return false; }
+}
+
+function isPlainMap(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function canonicalData(value) {
+  if (Array.isArray(value)) return value.map(canonicalData);
+  if (isPlainMap(value)) return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalData(value[key])]));
+  return value;
+}
+
+function sameData(left, right) {
+  return JSON.stringify(canonicalData(left)) === JSON.stringify(canonicalData(right));
+}
+
+function normalizeSite(value) {
+  if (typeof value !== "string") return null;
+  const site = value.trim().toLowerCase();
+  if (!site || site.length > 253 || site.split(".").some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return null;
+  return site;
+}
+
+async function readConfigRevision() {
+  const stored = await browser.storage.local.get(CONFIG_REVISION_KEY);
+  return Number.isSafeInteger(stored.configRevision) && stored.configRevision >= 0 ? stored.configRevision : 0;
+}
 
 async function readPendingConfigChange() {
   const result = await browser.storage.local.get(PENDING_CONFIG_CHANGE_KEY);
-  return result[PENDING_CONFIG_CHANGE_KEY] || null;
+  return isPlainMap(result[PENDING_CONFIG_CHANGE_KEY]) ? result[PENDING_CONFIG_CHANGE_KEY] : null;
 }
 
-async function schedulePendingConfigChange(pending) {
-  if (!browser.alarms) return;
-
-  if (!pending || !pending.unlockAt) {
-    await browser.alarms.clear(PENDING_CONFIG_CHANGE_ALARM);
-    return;
+function createPendingId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") return globalThis.crypto.randomUUID();
+  if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === "function") {
+    const bytes = globalThis.crypto.getRandomValues(new Uint32Array(4));
+    return Array.from(bytes, (value) => value.toString(16).padStart(8, "0")).join("");
   }
-
-  await browser.alarms.create(PENDING_CONFIG_CHANGE_ALARM, {
-    when: pending.unlockAt
-  });
+  // Older extension test environments may lack Web Crypto; product browsers have it.
+  return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2) + "-" + Math.random().toString(36).slice(2);
 }
 
-function describePendingConfigChange(pending) {
-  if (pending.type === "disableSiteWait") {
-    return "Turning off site wait for " + pending.site;
-  }
-
-  if (pending.type === "removeSite") {
-    return "Removing " + pending.site;
-  }
-
-  if (pending.type === "disableAirlock") {
-    return "Turning off Airlock";
-  }
-
-  if (pending.type === "disableMovingTarget") {
-    return "Turning off the moving target";
-  }
-
-  if (pending.type === "reduceDelay") {
-    const unit = pending.delayMinutes === 1 ? "minute" : "minutes";
-    return "Reducing wait to " + pending.delayMinutes + " " + unit;
-  }
-
-  if (pending.type === "reduceSettingsDelay") {
-    const unit = pending.settingsDelayMinutes === 1 ? "minute" : "minutes";
-    return "Reducing settings hold to " + pending.settingsDelayMinutes + " " + unit;
-  }
-
-  if (pending.type === "changeDailyLimit") {
-    if (pending.dailyLimitMinutes === null) {
-      return "Removing daily limit for " + pending.site;
-    }
-    return "Increasing daily limit for " + pending.site;
-  }
-
-  if (pending.type === "changeDailyLimitPolicy") {
-    return pending.previousDailyLimitPolicy.mode === "block"
-      ? "Changing limit to cooldown for " + pending.site
-      : "Reducing cooldown for " + pending.site;
-  }
-
-  if (pending.type === "endCooldown") {
-    return "Ending cooldown early";
-  }
-
-  if (pending.type === "disableDailyLock") {
-    return "Turning off daily lock";
-  }
-
-  if (pending.type === "changeDailyLockSchedule") {
-    return "Changing daily lock schedule";
-  }
-
-  return "Updating settings";
-}
-
-async function startPendingConfigChange(change) {
-  await reconcilePendingConfigChange();
-
-  const existing = await readPendingConfigChange();
-  if (existing) {
-    return { ok: false, reason: "pending-exists", pending: existing };
-  }
-
-  const config = await readConfig();
-  const startedAt = Date.now();
-  const waitMinutes = config.settingsDelayMinutes;
-  const pendingBase = {
-    id: String(startedAt),
-    startedAt: startedAt,
-    waitMinutes: waitMinutes
-  };
-
-  let pending = null;
-
-  if (change.type === "disableAirlock") {
-    if (!config.enabled) {
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "disableAirlock",
-      remainingMs: waitMinutes * MINUTE_MS
-    };
-  } else if (change.type === "disableMovingTarget") {
-    if (!config.movingTargetEnabled) {
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "disableMovingTarget",
-      remainingMs: waitMinutes * MINUTE_MS
-    };
-  } else if (change.type === "disableSiteWait") {
-    const site = String(change.site || "").trim().toLowerCase();
-    if (!site || !config.sites.includes(site)) {
-      return { ok: false, reason: "site-not-tracked", pending: null };
-    }
-    if (config.siteWaitEnabled[site] === false) {
-      return { ok: true, applied: true, pending: null };
-    }
-    pending = {
-      ...pendingBase,
-      type: "disableSiteWait",
-      site: site,
-      remainingMs: waitMinutes * MINUTE_MS
-    };
-  } else if (change.type === "removeSite") {
-    const site = String(change.site || "").trim().toLowerCase();
-    if (!site || !config.sites.includes(site)) {
-      return { ok: false, reason: "site-not-tracked", pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "removeSite",
-      site: site,
-      remainingMs: waitMinutes * MINUTE_MS
-    };
-  } else if (change.type === "reduceDelay") {
-    const delayMinutes = clampDelayMinutes(change.delayMinutes || DEFAULT_CONFIG.delayMinutes);
-
-    if (delayMinutes >= config.delayMinutes) {
-      await browser.storage.local.set({ delayMinutes: delayMinutes });
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "reduceDelay",
-      remainingMs: waitMinutes * MINUTE_MS,
-      delayMinutes: delayMinutes,
-      previousDelayMinutes: config.delayMinutes
-    };
-  } else if (change.type === "reduceSettingsDelay") {
-    const settingsDelayMinutes = clampDelayMinutes(
-      change.settingsDelayMinutes || DEFAULT_CONFIG.settingsDelayMinutes
-    );
-
-    if (settingsDelayMinutes >= config.settingsDelayMinutes) {
-      await browser.storage.local.set({ settingsDelayMinutes: settingsDelayMinutes });
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "reduceSettingsDelay",
-      remainingMs: waitMinutes * MINUTE_MS,
-      settingsDelayMinutes: settingsDelayMinutes,
-      previousSettingsDelayMinutes: config.settingsDelayMinutes
-    };
-  } else if (change.type === "changeDailyLimit") {
-    const site = String(change.site || "").trim().toLowerCase();
-    const dailyLimitMinutes = change.dailyLimitMinutes === null
-      ? null
-      : clampDailyLimitMinutes(change.dailyLimitMinutes);
-    const currentLimitMinutes = clampDailyLimitMinutes(config.dailyLimits[site]);
-
-    if (
-      !site ||
-      !config.sites.includes(site) ||
-      (change.dailyLimitMinutes !== null && dailyLimitMinutes === null)
-    ) {
-      return { ok: false, reason: "invalid-daily-limit", pending: null };
-    }
-
-    if (
-      dailyLimitMinutes !== null &&
-      (currentLimitMinutes === null || dailyLimitMinutes <= currentLimitMinutes)
-    ) {
-      await browser.storage.local.set({
-        dailyLimits: { ...config.dailyLimits, [site]: dailyLimitMinutes }
-      });
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "changeDailyLimit",
-      site: site,
-      dailyLimitMinutes: dailyLimitMinutes,
-      remainingMs: waitMinutes * MINUTE_MS
-    };
-  } else if (change.type === "changeDailyLimitPolicy") {
-    const site = String(change.site || "").trim().toLowerCase();
-    const currentPolicy = normalizeDailyLimitPolicy(config.dailyLimitPolicies[site]);
-    const dailyLimitPolicy = normalizeDailyLimitPolicy(change.dailyLimitPolicy);
-
-    if (!site || !config.sites.includes(site) || !config.dailyLimits[site]) {
-      return { ok: false, reason: "invalid-daily-limit-policy", pending: null };
-    }
-
-    if (!isDailyLimitPolicyWeaker(currentPolicy, dailyLimitPolicy)) {
-      await setDailyLimitPolicy(config, site, dailyLimitPolicy);
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "changeDailyLimitPolicy",
-      site: site,
-      dailyLimitPolicy: dailyLimitPolicy,
-      previousDailyLimitPolicy: currentPolicy,
-      remainingMs: waitMinutes * MINUTE_MS
-    };
-  } else if (change.type === "endCooldown") {
-    if (!config.cooldownUntil) {
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "endCooldown",
-      remainingMs: waitMinutes * MINUTE_MS,
-      cooldownUntil: config.cooldownUntil
-    };
-  } else if (change.type === "disableDailyLock") {
-    if (!config.dailyLockEnabled) {
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "disableDailyLock",
-      remainingMs: waitMinutes * MINUTE_MS
-    };
-  } else if (change.type === "changeDailyLockSchedule") {
-    const dailyLockStart = dailyLockApi.normalizeTimeOfDay(change.dailyLockStart, null);
-    const dailyLockEnd = dailyLockApi.normalizeTimeOfDay(change.dailyLockEnd, null);
-    const nextDuration = dailyLockApi.getDurationMinutes(dailyLockStart, dailyLockEnd);
-
-    if (!dailyLockStart || !dailyLockEnd || nextDuration === 0) {
-      return { ok: false, reason: "invalid-schedule", pending: null };
-    }
-
-    const direction = dailyLockApi.classifyScheduleChange(
-      config.dailyLockStart,
-      config.dailyLockEnd,
-      dailyLockStart,
-      dailyLockEnd
-    );
-
-    if (!config.dailyLockEnabled || direction === "same" || direction === "stronger") {
-      await browser.storage.local.set({
-        dailyLockStart: dailyLockStart,
-        dailyLockEnd: dailyLockEnd
-      });
-      return { ok: true, applied: true, pending: null };
-    }
-
-    pending = {
-      ...pendingBase,
-      type: "changeDailyLockSchedule",
-      remainingMs: waitMinutes * MINUTE_MS,
-      dailyLockStart: dailyLockStart,
-      dailyLockEnd: dailyLockEnd,
-      previousDailyLockStart: config.dailyLockStart,
-      previousDailyLockEnd: config.dailyLockEnd
-    };
-  } else {
-    return { ok: false, reason: "unknown-change", pending: null };
-  }
-
-  pending.description = describePendingConfigChange(pending);
-  await browser.storage.local.set({ [PENDING_CONFIG_CHANGE_KEY]: pending });
-  await schedulePendingConfigChange(pending);
-
-  return { ok: true, applied: false, pending: pending };
-}
-
-async function advancePendingConfigChange(elapsedMs) {
-  const pending = await readPendingConfigChange();
-  if (!pending) return { ok: true, applied: false, pending: null };
-
-  const elapsed = Math.max(0, Math.min(parseInt(elapsedMs, 10) || 0, MINUTE_MS));
-  const remainingMs = Math.max(0, getPendingRemainingMs(pending) - elapsed);
-  const nextPending = {
-    ...pending,
-    remainingMs: remainingMs
-  };
-
-  if (remainingMs > 0) {
-    await browser.storage.local.set({ [PENDING_CONFIG_CHANGE_KEY]: nextPending });
-    if (typeof nextPending.unlockAt === "number") {
-      await schedulePendingConfigChange(nextPending);
-    }
-    return { ok: true, applied: false, pending: nextPending };
-  }
-
-  await applyPendingConfigChange(nextPending);
-  return { ok: true, applied: true, pending: null };
-}
-
-async function cancelPendingConfigChange() {
+async function clearPendingConfigChange() {
   await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
+  progressCursors.clear();
+  pendingLease = null;
   await schedulePendingConfigChange(null);
-  return { ok: true, pending: null };
 }
 
-async function reconcilePendingConfigChange() {
-  const pending = await readPendingConfigChange();
-  if (!pending) {
-    await schedulePendingConfigChange(null);
-    return null;
+async function schedulePendingConfigChange() {
+  // Active engagement, never a wall-clock alarm, completes a hold. Legacy
+  // unlockAt records are normalized to a fixed remaining duration on startup.
+  if (browser.alarms && !pendingAlarmCleared) {
+    await browser.alarms.clear(PENDING_CONFIG_CHANGE_ALARM);
+    pendingAlarmCleared = true;
   }
-
-  if (!pending.type) {
-    await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
-    await schedulePendingConfigChange(null);
-    return null;
-  }
-
-  if (pending.type === "increaseResetHours") {
-    await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
-    await schedulePendingConfigChange(null);
-    return null;
-  }
-
-  if (pending.type === "endCooldown") {
-    const stored = await browser.storage.local.get("cooldownUntil");
-    const activeCooldownUntil = normalizeCooldownUntil(stored.cooldownUntil);
-    if (!activeCooldownUntil || activeCooldownUntil !== pending.cooldownUntil) {
-      await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
-      await schedulePendingConfigChange(null);
-      return null;
-    }
-  }
-
-  if (typeof pending.remainingMs === "number") {
-    const remainingMs = getPendingRemainingMs(pending);
-    if (remainingMs > 0) {
-      if (pending.remainingMs !== remainingMs) {
-        const nextPending = {
-          ...pending,
-          remainingMs: remainingMs
-        };
-        await browser.storage.local.set({ [PENDING_CONFIG_CHANGE_KEY]: nextPending });
-        await schedulePendingConfigChange(nextPending);
-        return nextPending;
-      }
-
-      await schedulePendingConfigChange(pending);
-      return pending;
-    }
-
-    await applyPendingConfigChange(pending);
-    return null;
-  }
-
-  if (!pending.unlockAt) {
-    await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
-    await schedulePendingConfigChange(null);
-    return null;
-  }
-
-  if (pending.unlockAt > Date.now()) {
-    await schedulePendingConfigChange(pending);
-    return pending;
-  }
-
-  await applyPendingConfigChange(pending);
-  return null;
 }
 
 function getPendingRemainingMs(pending) {
-  if (typeof pending.remainingMs === "number") {
-    return Math.max(0, pending.remainingMs);
-  }
-
-  if (typeof pending.unlockAt === "number") {
-    return Math.max(0, pending.unlockAt - Date.now());
-  }
-
-  const waitMinutes = clampDelayMinutes(
-    pending.waitMinutes || DEFAULT_CONFIG.settingsDelayMinutes
-  );
-  return waitMinutes * MINUTE_MS;
+  if (typeof pending.remainingMs === "number" && Number.isFinite(pending.remainingMs)) return Math.max(0, pending.remainingMs);
+  if (typeof pending.unlockAt === "number" && Number.isFinite(pending.unlockAt)) return Math.max(0, pending.unlockAt - Date.now());
+  return clampSettingsDelayMinutes(pending.waitMinutes === undefined ? DEFAULT_CONFIG.settingsDelayMinutes : pending.waitMinutes) * MINUTE_MS;
 }
 
-async function applyPendingConfigChange(pending) {
-  const config = await readConfig();
+function legacyChangePatch(change, config) {
+  const site = normalizeSite(change.site);
+  switch (change.type) {
+    case "disableAirlock": return { enabled: false };
+    case "disableMovingTarget": return { movingTargetEnabled: false };
+    case "disableSiteWait": return site && config.sites.includes(site) ? { siteWaitEnabled: { [site]: false } } : null;
+    case "removeSite": return site && config.sites.includes(site) ? { sites: config.sites.filter((entry) => entry !== site) } : null;
+    case "reduceDelay": return { delayMinutes: clampDelayMinutes(change.delayMinutes) };
+    case "reduceSettingsDelay": return { settingsDelayMinutes: clampSettingsDelayMinutes(change.settingsDelayMinutes) };
+    case "changeDailyLimit": return site && config.sites.includes(site) ? { dailyLimits: { [site]: change.dailyLimitMinutes === null ? null : clampDailyLimitMinutes(change.dailyLimitMinutes) } } : null;
+    case "changeDailyLimitPolicy": return site && config.sites.includes(site) && config.dailyLimits[site] ? { dailyLimitPolicies: { [site]: normalizeDailyLimitPolicy(change.dailyLimitPolicy) } } : null;
+    case "endCooldown": return { cooldownUntil: null };
+    case "disableDailyLock": return { dailyLockEnabled: false };
+    case "changeDailyLockSchedule": return { dailyLockStart: change.dailyLockStart, dailyLockEnd: change.dailyLockEnd };
+    default: return null;
+  }
+}
 
-  if (pending.type === "disableAirlock") {
-    if (config.enabled) {
-      await browser.storage.local.set({ enabled: false });
-    }
-  } else if (pending.type === "disableMovingTarget") {
-    if (config.movingTargetEnabled) {
-      await browser.storage.local.set({ movingTargetEnabled: false });
-    }
-  } else if (pending.type === "disableSiteWait" && config.sites.includes(pending.site)) {
-    await browser.storage.local.set({
-      siteWaitEnabled: { ...config.siteWaitEnabled, [pending.site]: false }
-    });
-    await reconcileExpiredSessions();
-  } else if (pending.type === "removeSite") {
-    const nextSites = config.sites.filter((site) => site !== pending.site);
-    const nextDailyLimits = { ...config.dailyLimits };
-    const nextSiteWaitEnabled = { ...config.siteWaitEnabled };
-    delete nextSiteWaitEnabled[pending.site];
-    const nextPolicies = { ...config.dailyLimitPolicies };
-    const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
-    const usageOffsets = await readDailyLimitUsageOffsets();
-    const nextCooldowns = { ...(storedCooldowns.dailyLimitCooldowns || {}) };
-    delete nextDailyLimits[pending.site];
-    delete nextPolicies[pending.site];
-    delete nextCooldowns[pending.site];
-    delete usageOffsets.sites[pending.site];
-    await browser.storage.local.set({
-      sites: nextSites,
-      siteWaitEnabled: nextSiteWaitEnabled,
-      dailyLimits: nextDailyLimits,
-      dailyLimitPolicies: nextPolicies,
-      dailyLimitCooldowns: nextCooldowns,
-      dailyLimitUsageOffsets: usageOffsets
-    });
-  } else if (pending.type === "reduceDelay") {
-    const delayMinutes = clampDelayMinutes(pending.delayMinutes || DEFAULT_CONFIG.delayMinutes);
-    const unchanged = pending.previousDelayMinutes === undefined
-      ? config.delayMinutes <= pending.waitMinutes
-      : config.delayMinutes === pending.previousDelayMinutes;
-    if (delayMinutes < config.delayMinutes && unchanged) {
-      await browser.storage.local.set({ delayMinutes: delayMinutes });
-    }
-  } else if (pending.type === "reduceSettingsDelay") {
-    const settingsDelayMinutes = clampDelayMinutes(
-      pending.settingsDelayMinutes || DEFAULT_CONFIG.settingsDelayMinutes
-    );
-    if (
-      settingsDelayMinutes < config.settingsDelayMinutes &&
-      config.settingsDelayMinutes === pending.previousSettingsDelayMinutes
-    ) {
-      await browser.storage.local.set({ settingsDelayMinutes: settingsDelayMinutes });
-    }
-  } else if (pending.type === "changeDailyLimit" && config.sites.includes(pending.site)) {
-    const nextDailyLimits = { ...config.dailyLimits };
-    if (pending.dailyLimitMinutes === null) {
-      delete nextDailyLimits[pending.site];
-    } else {
-      nextDailyLimits[pending.site] = clampDailyLimitMinutes(pending.dailyLimitMinutes);
-    }
-    const updates = { dailyLimits: nextDailyLimits };
-    if (pending.dailyLimitMinutes === null) {
-      const nextPolicies = { ...config.dailyLimitPolicies };
-      const storedCooldowns = await browser.storage.local.get("dailyLimitCooldowns");
-      const usageOffsets = await readDailyLimitUsageOffsets();
-      const nextCooldowns = { ...(storedCooldowns.dailyLimitCooldowns || {}) };
-      delete nextPolicies[pending.site];
-      delete nextCooldowns[pending.site];
-      delete usageOffsets.sites[pending.site];
-      updates.dailyLimitPolicies = nextPolicies;
-      updates.dailyLimitCooldowns = nextCooldowns;
-      updates.dailyLimitUsageOffsets = usageOffsets;
-    }
-    await browser.storage.local.set(updates);
-  } else if (pending.type === "changeDailyLimitPolicy" && config.sites.includes(pending.site)) {
-    const currentPolicy = normalizeDailyLimitPolicy(config.dailyLimitPolicies[pending.site]);
-    if (
-      JSON.stringify(currentPolicy) === JSON.stringify(pending.previousDailyLimitPolicy)
-    ) {
-      await setDailyLimitPolicy(config, pending.site, pending.dailyLimitPolicy);
-    }
-  } else if (pending.type === "endCooldown") {
-    if (config.cooldownUntil && config.cooldownUntil === pending.cooldownUntil) {
-      await browser.storage.local.set({ cooldownUntil: null });
-    }
-  } else if (pending.type === "disableDailyLock") {
-    if (config.dailyLockEnabled) {
-      await browser.storage.local.set({ dailyLockEnabled: false });
-    }
-  } else if (pending.type === "changeDailyLockSchedule") {
-    if (
-      config.dailyLockEnabled &&
-      config.dailyLockStart === pending.previousDailyLockStart &&
-      config.dailyLockEnd === pending.previousDailyLockEnd
-    ) {
-      await browser.storage.local.set({
-        dailyLockStart: pending.dailyLockStart,
-        dailyLockEnd: pending.dailyLockEnd
-      });
+function validateConfigPatch(config, patch) {
+  if (!isPlainMap(patch)) return { reason: "invalid-patch" };
+  const allowed = Object.keys(DEFAULT_CONFIG);
+  if (Object.keys(patch).some((key) => !allowed.includes(key))) return { reason: "unknown-setting" };
+  const next = { ...config, siteWaitEnabled: { ...config.siteWaitEnabled }, dailyLimits: { ...config.dailyLimits }, dailyLimitPolicies: { ...config.dailyLimitPolicies } };
+  const booleans = ["enabled", "movingTargetEnabled", "dailyLockEnabled"];
+  for (const key of booleans) {
+    if (patch[key] === undefined) continue;
+    if (typeof patch[key] !== "boolean") return { reason: "invalid-" + key };
+    next[key] = patch[key];
+  }
+  for (const key of ["delayMinutes", "settingsDelayMinutes"]) {
+    if (patch[key] === undefined) continue;
+    const minimum = key === "settingsDelayMinutes" ? 0 : 1;
+    if (!Number.isInteger(patch[key]) || patch[key] < minimum || patch[key] > 600) return { reason: "invalid-" + key };
+    next[key] = patch[key];
+  }
+  if (patch.sites !== undefined) {
+    if (!Array.isArray(patch.sites) || patch.sites.length > 1000 || patch.sites.some((site) => !normalizeSite(site))) return { reason: "invalid-sites" };
+    next.sites = [...new Set(patch.sites.map(normalizeSite))];
+  }
+  for (const key of ["siteWaitEnabled", "dailyLimits", "dailyLimitPolicies"]) {
+    if (patch[key] === undefined) continue;
+    if (!isPlainMap(patch[key])) return { reason: "invalid-" + key };
+    for (const [site, value] of Object.entries(patch[key])) {
+      if (normalizeSite(site) !== site || (!next.sites.includes(site) && !(value === null && config.sites.includes(site)))) return { reason: "site-not-tracked" };
+      if (value === null) { delete next[key][site]; continue; }
+      if (key === "siteWaitEnabled") {
+        if (typeof value !== "boolean") return { reason: "invalid-site-wait" };
+        if (value) delete next[key][site]; else next[key][site] = false;
+      } else if (key === "dailyLimits") {
+        if (!Number.isInteger(value) || value < 1 || value > MAX_DAILY_LIMIT_MINUTES) return { reason: "invalid-daily-limit" };
+        next[key][site] = value;
+      } else {
+        if (!isPlainMap(value) || !["block", "cooldown"].includes(value.mode) ||
+            Object.keys(value).some((field) => !["mode", "cooldownMinutes"].includes(field)) ||
+            (value.cooldownMinutes !== undefined && (!Number.isInteger(value.cooldownMinutes) || value.cooldownMinutes < 1 || value.cooldownMinutes > MAX_DAILY_LIMIT_COOLDOWN_MINUTES))) return { reason: "invalid-daily-limit-policy" };
+        if (value.mode === "block") delete next[key][site]; else next[key][site] = normalizeDailyLimitPolicy(value);
+      }
     }
   }
+  next.siteWaitEnabled = normalizeSiteWaitEnabled(next.siteWaitEnabled, next.sites);
+  next.dailyLimits = normalizeDailyLimits(next.dailyLimits, next.sites);
+  next.dailyLimitPolicies = normalizeDailyLimitPolicies(next.dailyLimitPolicies, next.sites);
+  for (const site of Object.keys(next.dailyLimitPolicies)) {
+    if (!next.dailyLimits[site]) {
+      if (patch.dailyLimitPolicies && patch.dailyLimitPolicies[site] !== undefined && patch.dailyLimitPolicies[site] !== null && patch.dailyLimitPolicies[site].mode !== "block") return { reason: "invalid-daily-limit-policy" };
+      delete next.dailyLimitPolicies[site];
+    }
+  }
+  for (const key of ["dailyLockStart", "dailyLockEnd"]) {
+    if (patch[key] === undefined) continue;
+    if (!dailyLockApi.parseTimeOfDay(patch[key])) return { reason: "invalid-schedule" };
+    next[key] = patch[key];
+  }
+  if ((next.dailyLockEnabled || patch.dailyLockStart !== undefined || patch.dailyLockEnd !== undefined) && next.dailyLockStart === next.dailyLockEnd) return { reason: "invalid-schedule" };
+  if (Object.prototype.hasOwnProperty.call(patch, "cooldownUntil")) {
+    if (patch.cooldownUntil !== null) return { reason: "invalid-cooldown" };
+    next.cooldownUntil = null;
+  }
+  if (patch.contentControls !== undefined) {
+    if (!controlsApi.isSupported(config.contentControls)) return { reason: "unsupported-controls-version" };
+    if (!controlsApi.validatePatch(patch.contentControls)) return { reason: "invalid-content-controls" };
+    next.contentControls = controlsApi.mergePatch(config.contentControls, patch.contentControls);
+  }
+  return { next };
+}
 
-  await browser.storage.local.remove(PENDING_CONFIG_CHANGE_KEY);
-  await schedulePendingConfigChange(null);
+function isConfigWeaker(config, next, patch) {
+  if ((config.enabled && !next.enabled) || (config.movingTargetEnabled && !next.movingTargetEnabled) ||
+      next.delayMinutes < config.delayMinutes || next.settingsDelayMinutes < config.settingsDelayMinutes ||
+      (config.cooldownUntil && !next.cooldownUntil) || (config.dailyLockEnabled && !next.dailyLockEnabled) ||
+      config.sites.some((site) => !next.sites.includes(site))) return true;
+  if (config.dailyLockEnabled && dailyLockApi.classifyScheduleChange(config.dailyLockStart, config.dailyLockEnd, next.dailyLockStart, next.dailyLockEnd) === "weaker") return true;
+  for (const site of config.sites) {
+    if (config.siteWaitEnabled[site] !== false && next.siteWaitEnabled[site] === false) return true;
+    const previousLimit = config.dailyLimits[site];
+    if (previousLimit && (!next.dailyLimits[site] || next.dailyLimits[site] > previousLimit)) return true;
+    if (isDailyLimitPolicyWeaker(config.dailyLimitPolicies[site], next.dailyLimitPolicies[site])) return true;
+  }
+  return patch.contentControls !== undefined && controlsApi.classifyPatch(config.contentControls, patch.contentControls) === "weaker";
+}
+
+async function commitConfig(config, next) {
+  const revision = await readConfigRevision();
+  const updates = {};
+  for (const key of Object.keys(DEFAULT_CONFIG)) {
+    if (!sameData(config[key], next[key])) updates[key] = next[key];
+  }
+  if (!Object.keys(updates).length) return false;
+  const stored = await browser.storage.local.get("dailyLimitCooldowns");
+  const cooldowns = { ...(stored.dailyLimitCooldowns || {}) };
+  const usageOffsets = await readDailyLimitUsageOffsets();
+  let cooldownsChanged = false;
+  let offsetsChanged = false;
+  for (const site of config.sites) {
+    if (!next.sites.includes(site) || (config.dailyLimits[site] && !next.dailyLimits[site])) {
+      delete cooldowns[site]; delete usageOffsets.sites[site]; cooldownsChanged = true; offsetsChanged = true;
+    } else if (!sameData(config.dailyLimitPolicies[site], next.dailyLimitPolicies[site])) {
+      const from = normalizeDailyLimitPolicy(config.dailyLimitPolicies[site]);
+      const to = normalizeDailyLimitPolicy(next.dailyLimitPolicies[site]);
+      if (to.mode === "block") delete cooldowns[site];
+      else if (from.mode === "cooldown" && Number.isFinite(Number(cooldowns[site]))) cooldowns[site] = Number(cooldowns[site]) + (to.cooldownMinutes - from.cooldownMinutes) * MINUTE_MS;
+      cooldownsChanged = true;
+    }
+  }
+  if (cooldownsChanged) updates.dailyLimitCooldowns = cooldowns;
+  if (offsetsChanged) updates.dailyLimitUsageOffsets = usageOffsets;
+  updates.configRevision = revision + 1;
+  await browser.storage.local.set(updates);
+  await reconcileExpiredSessions();
   await scheduleMidnightResetAlarm();
   await scheduleDailyLockBoundaryAlarm();
   await scheduleCooldownBoundaryAlarm();
   await broadcastConfigRecheck();
   await updateBadge();
+  return true;
 }
+
+async function getSettingsSnapshot(tabId) {
+  const config = await readConfig();
+  const [revision, pending, usage, stored, usageOffsets] = await Promise.all([
+    readConfigRevision(), readPendingConfigChange(), readDailyUsage(),
+    browser.storage.local.get("dailyLimitCooldowns"), readDailyLimitUsageOffsets()
+  ]);
+  const snapshot = { ok: true, config: { ...config, contentControls: controlsApi.normalize(config.contentControls) },
+    contentControlsSupported: controlsApi.isSupported(config.contentControls),
+    storedContentControlsVersion: config.contentControls && config.contentControls.version, revision, pending, usage,
+    dailyLimitCooldowns: normalizeDailyLimitCooldowns(stored.dailyLimitCooldowns, config.sites), dailyLimitUsageOffsets: usageOffsets };
+  if (Number.isInteger(tabId)) snapshot.currentSiteStatus = await getCurrentSiteStatus(tabId, snapshot);
+  return snapshot;
+}
+
+async function getCurrentSiteStatus(tabId, snapshot) {
+  let tab;
+  try { tab = await browser.tabs.get(tabId); } catch { return null; }
+  let domain;
+  try { domain = new URL(tab.url).hostname; } catch { return null; }
+  const { config, usage, dailyLimitCooldowns, dailyLimitUsageOffsets } = snapshot;
+  const site = getTrackedSite(domain, config.sites);
+  const active = await isTabActiveAndFocused(tabId);
+  const now = Date.now();
+  const todayUsedMs = site ? usage.sites[site] || 0 : 0;
+  const limit = site ? config.dailyLimits[site] || null : null;
+  const policy = normalizeDailyLimitPolicy(site && config.dailyLimitPolicies[site]);
+  const siteCooldown = site ? dailyLimitCooldowns[site] : null;
+  const expiredBudget = Number.isFinite(siteCooldown) && siteCooldown <= now;
+  const allowanceUsedMs = expiredBudget ? 0 : Math.max(0, todayUsedMs - (site ? dailyLimitUsageOffsets.sites[site] || 0 : 0));
+  const status = { domain, site, tracked: site !== null, active, paused: !active, reason: "allowed", remainingMs: null,
+    unlockAt: null, resetAt: getNextLocalMidnight(now), todayUsedMs, allowanceUsedMs, dailyLimitMinutes: limit, dailyLimitMode: policy.mode };
+  if (!site) status.reason = "untracked";
+  else if (config.cooldownUntil) { status.reason = "cooldown"; status.unlockAt = config.cooldownUntil; }
+  else if (!config.enabled) status.reason = "disabled";
+  else if (getDailyLockState(config, now).locked) { status.reason = "daily-lock"; status.unlockAt = getDailyLockState(config, now).unlockAt; }
+  else if (limit && allowanceUsedMs >= limit * MINUTE_MS) { status.reason = "daily-limit"; status.resetAt = siteCooldown > now ? siteCooldown : getNextLocalMidnight(now); }
+  else if (requiresSiteWait(domain, config)) {
+    const session = await getSession(tabId);
+    if (!session || session.domain !== domain || isSessionExpired(session, now) || (!session.completed && session.remainingMs > 0)) {
+      status.reason = "wait";
+      status.remainingMs = session && session.domain === domain && !isSessionExpired(session, now) ? session.remainingMs : config.delayMinutes * MINUTE_MS;
+    }
+  }
+  return status;
+}
+
+function getSettingsState(message, sender) {
+  if (!isSettingsSender(sender)) return Promise.resolve({ ok: false, reason: "untrusted-sender" });
+  return enqueueSettingsCommand(async () => {
+    await reconcilePendingConfigChangeInternal();
+    return getSettingsSnapshot(message.tabId);
+  });
+}
+
+async function settingsFailure(reason, tabId) {
+  return { ...(await getSettingsSnapshot(tabId)), ok: false, reason };
+}
+
+function requestConfigChange(message, sender) {
+  if (!isSettingsSender(sender)) return Promise.resolve({ ok: false, reason: "untrusted-sender" });
+  return enqueueSettingsCommand(() => requestConfigChangeInternal(message));
+}
+
+async function requestConfigChangeInternal(message) {
+  await reconcilePendingConfigChangeInternal();
+  const config = await readConfig();
+  const revision = await readConfigRevision();
+  if (!Number.isSafeInteger(message.expectedRevision) || message.expectedRevision !== revision) return settingsFailure("stale-revision", message.tabId);
+  if (await readPendingConfigChange()) return settingsFailure("pending-exists", message.tabId);
+  const validated = validateConfigPatch(config, message.patch);
+  if (validated.reason) return settingsFailure(validated.reason, message.tabId);
+  const next = validated.next;
+  if (sameData(config, next)) return { ...(await getSettingsSnapshot(message.tabId)), applied: true };
+  if (config.settingsDelayMinutes === 0 || !isConfigWeaker(config, next, message.patch)) {
+    await commitConfig(config, next);
+    return { ...(await getSettingsSnapshot(message.tabId)), applied: true };
+  }
+  const pending = {
+    id: createPendingId(), type: "configPatch",
+    patch: message.patch, baseRevision: revision, baseConfig: config, createdAt: Date.now(),
+    waitMinutes: config.settingsDelayMinutes, remainingMs: config.settingsDelayMinutes * MINUTE_MS,
+    description: "Changing Airlock settings"
+  };
+  pendingLease = null;
+  await browser.storage.local.set({ [PENDING_CONFIG_CHANGE_KEY]: pending });
+  await schedulePendingConfigChange(pending);
+  return { ...(await getSettingsSnapshot(message.tabId)), applied: false };
+}
+
+function legacyPendingMatches(pending, config) {
+  if (pending.type === "reduceDelay") return pending.previousDelayMinutes === undefined ? config.delayMinutes <= pending.waitMinutes : config.delayMinutes === pending.previousDelayMinutes;
+  if (pending.type === "reduceSettingsDelay") return config.settingsDelayMinutes === pending.previousSettingsDelayMinutes;
+  if (pending.type === "changeDailyLimitPolicy") return sameData(normalizeDailyLimitPolicy(config.dailyLimitPolicies[pending.site]), pending.previousDailyLimitPolicy);
+  if (pending.type === "changeDailyLockSchedule") return config.dailyLockEnabled && config.dailyLockStart === pending.previousDailyLockStart && config.dailyLockEnd === pending.previousDailyLockEnd;
+  if (pending.type === "endCooldown") return config.cooldownUntil === pending.cooldownUntil;
+  return true;
+}
+
+async function reconcilePendingConfigChangeInternal() {
+  await expireCooldownInternal();
+  let pending = await readPendingConfigChange();
+  const storedPending = pending;
+  if (!pending) { await schedulePendingConfigChange(null); return null; }
+  if (!pending.type || pending.type === "increaseResetHours") { await clearPendingConfigChange(); return null; }
+  const config = await readConfig();
+  if (pending.type === "endCooldown" && (!config.cooldownUntil || config.cooldownUntil !== pending.cooldownUntil)) { await clearPendingConfigChange(); return null; }
+  if (!pending.patch) {
+    if (!legacyPendingMatches(pending, config)) { await clearPendingConfigChange(); return null; }
+    const patch = legacyChangePatch(pending, config);
+    if (!patch) { await clearPendingConfigChange(); return null; }
+    pending = { ...pending, patch, baseRevision: await readConfigRevision(), baseConfig: config };
+  }
+  if (pending.baseRevision !== await readConfigRevision() || !sameData(config, pending.baseConfig)) { await clearPendingConfigChange(); return null; }
+  const remainingMs = getPendingRemainingMs(pending);
+  pending = { ...pending, id: pending.id || createPendingId(), remainingMs };
+  delete pending.unlockAt;
+  if (!pending.description) pending.description = "Changing Airlock settings";
+  if (!sameData(pending, storedPending)) await browser.storage.local.set({ [PENDING_CONFIG_CHANGE_KEY]: pending });
+  await schedulePendingConfigChange(pending);
+  if (remainingMs <= 0) { await applyPendingConfigChangeInternal(pending); return null; }
+  return pending;
+}
+
+function reconcilePendingConfigChange() {
+  return enqueueSettingsCommand(reconcilePendingConfigChangeInternal);
+}
+
+async function applyPendingConfigChangeInternal(pending) {
+  const config = await readConfig();
+  if (pending.baseRevision !== await readConfigRevision() || !sameData(config, pending.baseConfig)) {
+    await clearPendingConfigChange(); return false;
+  }
+  const validated = validateConfigPatch(config, pending.patch);
+  if (validated.reason) { await clearPendingConfigChange(); return false; }
+  await commitConfig(config, validated.next);
+  await clearPendingConfigChange();
+  return true;
+}
+
+async function isSettingsViewActive(sender) {
+  if (sender.tab) return isTabActiveAndFocused(sender.tab.id);
+  if (browser.windows.getLastFocused) {
+    try { return (await browser.windows.getLastFocused()).focused === true; } catch { return false; }
+  }
+  return windowFocused;
+}
+
+function leaseOwner(sender) {
+  return (sender.documentId || "") + "|" + (sender.tab ? sender.tab.id : "popup") + "|" + (sender.url || "");
+}
+
+function advancePendingConfigChange(message, sender) {
+  if (!isSettingsSender(sender)) return Promise.resolve({ ok: false, reason: "untrusted-sender" });
+  return enqueueSettingsCommand(async () => {
+    await reconcilePendingConfigChangeInternal();
+    const pending = await readPendingConfigChange();
+    if (!pending || message.pendingId !== pending.id) return settingsFailure("stale-pending", message.tabId);
+    if (typeof message.clientId !== "string" || message.clientId.length < 1 || message.clientId.length > 200 ||
+        !Number.isSafeInteger(message.sequence) || message.sequence < 0 || !Number.isFinite(message.elapsedMs) || message.elapsedMs < 0) return settingsFailure("invalid-progress", message.tabId);
+    if (!await isSettingsViewActive(sender)) {
+      if (pendingLease && pendingLease.clientId === message.clientId && pendingLease.owner === leaseOwner(sender)) pendingLease = null;
+      return settingsFailure("inactive-view", message.tabId);
+    }
+    const now = Date.now();
+    const owner = leaseOwner(sender);
+    const cursorKey = pending.id + "|" + message.clientId + "|" + owner;
+    if (progressCursors.has(cursorKey) && message.sequence <= progressCursors.get(cursorKey)) return settingsFailure("stale-sequence", message.tabId);
+    if (pendingLease && pendingLease.pendingId === pending.id && now - pendingLease.lastAt <= SETTINGS_LEASE_MS) {
+      if (pendingLease.clientId !== message.clientId || pendingLease.owner !== owner) return settingsFailure("lease-held", message.tabId);
+      if (message.sequence <= pendingLease.sequence) return settingsFailure("stale-sequence", message.tabId);
+      const elapsed = Math.min(message.elapsedMs, Math.max(0, now - pendingLease.lastAt), MAX_SETTINGS_TICK_MS);
+      const next = { ...pending, remainingMs: Math.max(0, pending.remainingMs - elapsed) };
+      progressCursors.set(cursorKey, message.sequence);
+      pendingLease = { ...pendingLease, sequence: message.sequence, lastAt: now };
+      if (next.remainingMs <= 0) {
+        const applied = await applyPendingConfigChangeInternal(next);
+        return { ...(await getSettingsSnapshot(message.tabId)), applied };
+      }
+      await browser.storage.local.set({ [PENDING_CONFIG_CHANGE_KEY]: next });
+    } else {
+      progressCursors.set(cursorKey, message.sequence);
+      pendingLease = { pendingId: pending.id, clientId: message.clientId, owner, sequence: message.sequence, lastAt: now };
+    }
+    return { ...(await getSettingsSnapshot(message.tabId)), applied: false };
+  });
+}
+
+function releasePendingConfigChange(message, sender) {
+  if (!isSettingsSender(sender)) return Promise.resolve({ ok: false, reason: "untrusted-sender" });
+  return enqueueSettingsCommand(async () => {
+    const pending = await readPendingConfigChange();
+    if (!pending || message.pendingId !== pending.id) return settingsFailure("stale-pending", message.tabId);
+    if (pendingLease && pendingLease.clientId === message.clientId && pendingLease.owner === leaseOwner(sender)) pendingLease = null;
+    return getSettingsSnapshot(message.tabId);
+  });
+}
+
+function cancelPendingConfigChange(message, sender) {
+  if (!isSettingsSender(sender)) return Promise.resolve({ ok: false, reason: "untrusted-sender" });
+  return enqueueSettingsCommand(async () => {
+    const pending = await readPendingConfigChange();
+    if (!pending || message.pendingId !== pending.id) return settingsFailure("stale-pending", message.tabId);
+    await clearPendingConfigChange();
+    return getSettingsSnapshot(message.tabId);
+  });
+}
+
 
 async function reconcileExpiredSessions() {
   const config = await readConfig();
@@ -1404,6 +1368,8 @@ if (browser.alarms) {
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") return;
 
+  if (changes.contentControls || changes.configRevision) broadcastConfigRecheck();
+
   if (changes.enabled || changes.sites || changes.siteWaitEnabled || changes.delayMinutes) {
     reconcileExpiredSessions().catch((error) => {
       console.warn("[Airlock] Failed to reconcile expired sessions:", error);
@@ -1503,34 +1469,26 @@ function enqueueDailyUsageUpdate(tabId, domain, elapsedMs) {
 }
 
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === "GET_PENDING_CONFIG_CHANGE") {
-    reconcilePendingConfigChange().then((pending) => {
-      sendResponse({ pending: pending });
-    });
+  if (!message || typeof message.type !== "string") return;
+  const settingsCommands = {
+    GET_SETTINGS_STATE: () => getSettingsState(message, sender),
+    REQUEST_CONFIG_CHANGE: () => requestConfigChange(message, sender),
+    CANCEL_PENDING_CONFIG_CHANGE: () => cancelPendingConfigChange(message, sender),
+    ADVANCE_PENDING_CONFIG_CHANGE: () => advancePendingConfigChange(message, sender),
+    RELEASE_PENDING_CONFIG_CHANGE: () => releasePendingConfigChange(message, sender)
+  };
+  if (Object.prototype.hasOwnProperty.call(settingsCommands, message.type)) {
+    settingsCommands[message.type]().then(sendResponse).catch(() => sendResponse({ ok: false, reason: "settings-unavailable" }));
     return true;
   }
-
-  if (message.type === "START_PENDING_CONFIG_CHANGE") {
-    startPendingConfigChange(message.change || {}).then(sendResponse);
-    return true;
-  }
-
-  if (message.type === "CANCEL_PENDING_CONFIG_CHANGE") {
-    cancelPendingConfigChange().then(sendResponse);
-    return true;
-  }
-
-  if (message.type === "ADVANCE_PENDING_CONFIG_CHANGE") {
-    advancePendingConfigChange(message.elapsedMs).then(sendResponse);
-    return true;
-  }
-
   if (message.type === "START_COOLDOWN") {
-    startCooldown().then(sendResponse);
+    if (!isSettingsSender(sender) && !isContentSender(sender)) {
+      sendResponse({ ok: false, reason: "untrusted-sender" });
+    } else startCooldown(sender).then(sendResponse).catch(() => sendResponse({ ok: false, reason: "settings-unavailable" }));
     return true;
   }
 
-  if (!sender.tab) return;
+  if (!isContentSender(sender)) return;
   const tabId = sender.tab.id;
 
   if (message.type === "GET_ACTIVE_STATE") {
@@ -1558,7 +1516,11 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "TIMER_DONE") {
-    handleTimerDone(tabId).then(updateBadge);
+    handleTimerDone(tabId).then(async () => {
+      await updateBadge();
+      sendResponse({ ok: true });
+    }).catch(() => sendResponse({ ok: false, reason: "timer-unavailable" }));
+    return true;
   }
 });
 
@@ -1746,4 +1708,21 @@ async function handleTimerUpdate(tabId, remainingMs) {
     session.remainingMs = remainingMs;
     await setSession(tabId, session);
   }
+}
+
+// Notify supported top-level pages to evaluate their current URL. Event URLs are
+// never forwarded: an older event must not replay an obsolete route decision.
+if (browser.webNavigation) {
+  const notifyRouteChange = (details) => {
+    if (!details || details.frameId !== 0 || !Number.isInteger(details.tabId) || details.tabId < 0) return;
+    try {
+      const url = new URL(details.url);
+      if ((url.protocol === "https:" || url.protocol === "http:") && controlsApi.getPlatform(url.hostname)) {
+        sendTabMessage(details.tabId, { type: "AIRLOCK_ROUTE_CHANGED" });
+      }
+    } catch { /* Invalid/unsupported navigation. */ }
+  };
+  const routeFilter = { url: ["youtube.com", "instagram.com", "facebook.com"].map((hostSuffix) => ({ hostSuffix })) };
+  browser.webNavigation.onCommitted.addListener(notifyRouteChange, routeFilter);
+  browser.webNavigation.onHistoryStateUpdated.addListener(notifyRouteChange, routeFilter);
 }

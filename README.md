@@ -1,34 +1,39 @@
 # Airlock
 
-A cross-browser (Chrome + Firefox) Manifest V3 extension that adds intentional friction before accessing distracting websites. When you navigate to a tracked site, the page is covered with a calming countdown overlay. The timer only counts down while the tab is actively focused -- switching away pauses it. Per-site daily time limits, scheduled daily locks, and one-hour cooldowns can make tracked sites unavailable.
+A desktop Chrome and Firefox Manifest V3 extension for managing distracting websites in one place: focused-time monitoring, intentional waits, time restrictions, and optional YouTube, Instagram and Facebook content controls.
 
-## How It Works
+## Controls and monitoring
 
-1. You configure separate site-entry and settings-change hover delays, a list of websites, optional per-site daily limits, optional moving-target motion, and an optional daily lock window via the popup
-2. When any tab navigates to a tracked site with **Site wait** enabled, a fullscreen overlay appears with a countdown timer and breathing focus target
-3. The timer **pauses** when you switch tabs, switch windows, or minimize the browser
-4. The timer **resumes** when you return to the tab and keep the pointer on the overlay target
-5. When the countdown reaches zero, a "Continue" button appears to dismiss the overlay
-6. Refreshing the page resumes the existing timer (doesn't reset it)
-7. Opening a new tab to the same site starts a fresh timer
-8. Navigating within a site after completing the timer does not re-trigger it again that day
-9. At local midnight, usage counters reset and tracked tabs with **Site wait** enabled require a fresh wait
-10. Every security-affecting settings change asks for confirmation; weaker changes also require the independently configured settings hold before applying
-11. Settings holds only count down while the popup is open and the settings hover target is active
-12. During the daily lock window, tracked sites show a non-dismissible lock overlay until the configured local end time
-13. Daily lock windows can run within one day or across midnight; open tabs update automatically at both boundaries
-14. Every tracked site records focused, visible time, shared across matching tabs and subdomains; optional daily limits use the same counter, and all usage resets at local midnight
-15. Starting a cooldown blocks every tracked site for one hour, even if the main Airlock toggle is turned off
-16. At every 20 minutes of focused use on a tracked site, a small in-page check-in offers a one-click, one-hour cooldown; dismissing it leaves the page uninterrupted, and the next check-in appears 20 minutes later
-17. Ending a cooldown early, disabling a daily lock, or removing any currently locked time from its schedule requires hovering the popup target for the configured settings hold
+Airlock combines local focused-time monitoring, site-entry waits, daily budgets and scheduled locks with optional content controls for YouTube, Instagram and Facebook. The popup shows current-site status and quick actions; **Settings** opens the full configuration page.
 
-After confirmation, stronger settings apply immediately: turning Airlock or the moving target on, adding a tracked site or daily limit, increasing either delay, reducing the daily allowance, starting a cooldown, enabling a daily lock, expanding its locked-time coverage, selecting a hard daily-limit block, or lengthening a per-site cooldown.
+All new content controls start **off**. They work on their supported sites without adding those sites to the tracked list. Tracking and time restrictions still require adding a site. The optional presets change content controls only.
 
-Weaker settings require both confirmation and the settings hold: turning Airlock or the moving target off, removing a site or daily limit, reducing the site wait or settings hold, increasing the daily allowance, ending a cooldown, disabling a daily lock, changing its schedule in a way that removes any currently locked time, switching from a hard block to a per-site cooldown, or shortening that cooldown. Changing a disabled daily lock's start or end time is neutral and applies immediately.
+| Site | Content controls |
+|---|---|
+| YouTube | Hide Shorts cards/shelves, hide Shorts navigation, convert direct Shorts URLs to the normal watch player |
+| Instagram | Block Reels and Explore, hide or block Stories, choose Following or Messages for Home, hide the home feed, comments, Notes, Threads prompts, engagement counts, unread badges, videos or images |
+| Facebook | Hide Reels, send direct Reel URLs to Home, hide Stories and suggested content |
 
-Domain matching: entering `reddit.com` will match `reddit.com`, `www.reddit.com`, `old.reddit.com`, etc.
+Converting a YouTube Short to the normal player still permits watching that video. Instagram media controls may also hide attachments in messages; authentication and account-recovery surfaces are exempt. Hiding content is a presentation control, not a network-level media blocker. Website changes and layout variants can affect matching; see the validation notes in this repository before treating a feature as verified against your live account.
 
-To track a website or apply time-of-day restrictions without a countdown, uncheck **Require site wait for new sites** before adding it with either add-site action. For an existing site, uncheck its **Site wait** checkbox and complete the settings hold. Usage tracking, daily locks, daily limits, and cooldowns still apply. Existing sites keep their waits by default; turning a wait back on applies immediately after confirmation.
+**Instagram controls are experimental.** Authenticated Home, Following, Search, inbox, Notes and engagement layouts have not been verified against a live account. Ambiguous Explore surfaces stay available to avoid breaking Search; image controls preserve containers that also contain text or actions. Controlled fixtures establish the implemented rules, not full live-site coverage.
+
+### Existing Airlock behavior
+
+- A tracked site's entry wait counts only while its tab is visible, focused and the hold target is engaged. Pointer, touch and keyboard engagement use the same duration. A completed wait stays complete for that tab and hostname until local midnight; a new tab starts a separate wait.
+- Refreshing resumes the existing wait. The overlay's Continue action becomes available only after the wait finishes. Daily locks, exhausted hard daily limits and active cooldowns cannot be dismissed through Continue.
+- Focused usage is aggregated for each tracked site, including matching subdomains, and resets at local midnight. Waiting, blocked and pending-redirect time is excluded. Ordinary browsing with content hidden still counts.
+- Turn **Site wait** off for a tracked site to retain monitoring and other restrictions without an entry countdown. Existing sites keep their wait setting.
+- The main Restrictions switch disables content controls, entry waits, scheduled locks and daily-limit enforcement. Usage monitoring continues on tracked sites. An active manually started one-hour cooldown remains enforced.
+- Daily locks support same-day and overnight local-time windows. Daily limits support hard blocks or a per-site cooldown. The existing focused-use check-in can start a one-hour cooldown for all tracked sites.
+
+Domain matching is bounded: `reddit.com` includes `www.reddit.com` and `old.reddit.com`, not `notreddit.com`.
+
+### Changing settings
+
+Settings changes are confirmed in the UI and validated by the background controller. Stronger changes apply immediately after confirmation. Weaker changes require the configured **Settings hold**; examples include turning a restriction off, increasing a daily allowance, ending a cooldown early, or removing locked time from a schedule. The hold can be set from 0 to 600 minutes; at 0, all changes apply immediately after confirmation. Reducing the hold uses its current duration. A change that mixes stronger and weaker settings applies atomically after any required hold.
+
+The popup and settings page share one authoritative pending change. A hold advances only while its target is engaged in a focused, visible view, and pauses on release, blur or closing the view. Only one view can advance it at a time. The remaining hold survives reopening the UI. Concurrent settings edits are revision-checked to prevent one view silently overwriting another.
 
 ## Build
 
@@ -40,7 +45,7 @@ npm run build:firefox  # Firefox only
 ```
 
 The build script handles browser differences automatically:
-- **Chrome**: converts background to `service_worker`, injects `webextension-polyfill` into background/popup/content scripts
+- **Chrome**: converts background to `service_worker`, injects `webextension-polyfill` into the background, popup, options page and each content-script entry
 - **Firefox**: uses the authored `firefox/manifest.json` with native `browser.*` support
 
 ## Firefox AMO Package
@@ -95,6 +100,45 @@ After making source changes, run `npm run build` and reload the extension.
 
 ## Testing
 
+Run `npm test` for policy, runtime, adapter, UI and packaging tests. After building, `npm run test:browser` runs the Chromium and Firefox extension fixtures; individual commands are `npm run test:browser:chromium` and `npm run test:browser:firefox`. The browser harness needs the corresponding browser/driver tooling and uses isolated test profiles.
+
+Build output is generated from source; never edit `dist/` directly. Browser fixture checks exercise controlled pages and do not establish compatibility with every authenticated website layout.
+
+Automated popup captures load the popup document in an extension tab. This exercises its rendering and shared settings behavior but does not reproduce the toolbar click that grants `activeTab`; manually check current-site actions from the actual toolbar popup. Media tests cover pause/suppression calls and DOM restoration; live authenticated playback and site layout variants still need account-level checks.
+
+```sh
+npm ci
+npx playwright install chromium
+npm run build
+npm run test:browser
+```
+
+Firefox defaults to `/Applications/Firefox.app/Contents/MacOS/firefox`; set `AIRLOCK_FIREFOX_BINARY` for another installation. The pinned geckodriver is downloaded to a temporary cache on first use, which requires network access. To test the packaged Firefox ZIP, set `AIRLOCK_FIREFOX_ADDON` to its absolute path. The fixture proxy uses local `openssl` to create a temporary certificate and serves controlled pages at supported site origins without contacting those sites. Screenshots are written under `store/test-artifacts/`.
+
+### Integration and usability validation — 2026-10-21
+
+The combined implementation from `distraction-blocker/AirLock` is integrated into this repository, including source, tests, options UI, packaging and license notices. Existing settings are retained and new content controls default off.
+
+- Node 22.22.2: all 185 automated tests passed, with none skipped. Added coverage verifies zero-minute holds, preserving the previous hold when reducing it to zero, keyboard focus after site-list refresh, and native dialog close-event ordering.
+- Chrome and Firefox builds succeeded; Firefox packaging reported zero lint errors, notices or warnings. The separate web-ext update check could not access its local configuration store; packaging still succeeded.
+- The complete browser suites passed on Chromium 153.0.8010.12 and Firefox 158.0 (packaged ZIP). Browser checks use isolated profiles and controlled HTTPS fixtures, including real 60-second settings holds, reversible filtering, route handling and core wait priority. Expanded UI checks cover keyboard confirmation/cancel, focus return, background controls remaining inaccessible behind modal dialogs, zero-minute confirmed changes, named controls on every settings panel, narrow layouts, enlarged text and long/empty site lists.
+- Representative desktop, narrow, pending-change, empty-site, enlarged-text and forced-color screenshots were visually inspected. No blocking layout defect was found. Fixed a lost-focus issue on refreshed site disclosures and a rapid cancel/reopen confirmation race.
+- Actual logged-out YouTube, Facebook and Instagram pages loaded with the short-form preset enabled. Search/sign-in and account access remained visible; no horizontal overflow or observed Airlock page errors occurred. Facebook and Instagram presented login pages, so this does not validate their authenticated feeds or playback. Reports/screenshots: `store/test-artifacts/public-sites/`.
+- A real Firefox toolbar pointer click opened Airlock's native popup URL at a 300×600-pixel content size. WebDriver cannot inspect its XUL popup browser, so native current-site actions, activeTab behavior, keyboard/scrolling and Settings navigation remain unverified. Report: `store/test-artifacts/native-firefox/report.json`.
+- Authenticated layouts, mobile devices and a screen-reader audit remain outside these checks. Instagram controls remain experimental.
+- Updated web-ext to 10.8.0 and refreshed compatible tooling dependencies. Audit decreased from 10 entries to three high entries, with no critical entries; all remaining entries arise from one unfixed node-forge advisory through adbkit/web-ext. The production dependency audit is clean. Tooling packages are not shipped in the extension.
+
+Supplemental checks: `node scripts/browser-ui-smoke.js chromium` (or `firefox`), `node scripts/native-toolbar-smoke.js`, and `node scripts/public-site-smoke.js`. Public-site checks require network access and use an isolated logged-out profile.
+
+### Original distraction-blocker validation — 2026-09-30
+
+- Node 22.23.3: **180 tests passed**, with none failed or skipped. Regression coverage includes delayed back/forward-cache settings reads and popup status convergence after configuration changes.
+- Both builds and Firefox packaging passed; Mozilla lint reported **zero errors, notices or warnings**.
+- Chromium 153.0.8010.12 loaded the unpacked build; Firefox 156.0.1 loaded the final packaged ZIP. Both passed controlled-origin checks for settings confirmations, real 60-second keyboard holds with release/pause/resume, reversible filtering on all three sites, normal-content preservation, route redirects and entry-wait priority.
+- Visual checks covered narrow layouts, enlarged text, pending changes, long domains and empty/large site lists. Chromium reached 320 CSS pixels and checked forced colors/reduced motion; this Firefox harness enforced a 500 CSS pixel minimum. Screenshots were inspected for wrapping, clipping and focus visibility.
+
+The original workspace’s unsigned Firefox package was `store/firefox-addon-1.0.13.zip` (SHA-256 `fef9d90d69d4950768f661f3e6b01e1ba011f27f8364fefdeff7b95895649f53`). Its 27 regular files match the authored package inputs. These are local fixture results; authenticated layouts, native toolbar popup context and mobile releases still need their respective live checks.
+
 ### Basic flow
 1. Click the extension icon and add a site (e.g. `reddit.com`) -- or use the "Track current site" button
 2. Navigate to that site -- overlay appears with countdown
@@ -107,7 +151,18 @@ After making source changes, run `npm run build` and reload the extension.
 - Minimize the browser -- timer pauses
 - Restore -- timer resumes
 - Enable hover target -- timer only runs while hovering the circle
-- Start a guarded settings change -- its independent **Settings hold** countdown only runs while hovering the popup target
+- Start a guarded settings change -- its independent **Settings hold** countdown only runs while engaging the settings hold target
+- Hold Space/Enter or use touch on the target; releasing, switching views or losing focus must pause it
+- Open popup and settings together; the same pending change must not advance twice as fast
+
+### Content controls
+- Start with all new controls off and check normal site content remains visible
+- Enable one rule, check a matching element is hidden, then disable it and verify the element returns
+- Check dynamically inserted content and same-document navigation without refreshing
+- Verify ordinary videos/posts, mixed YouTube shelves, messages, intentional Search and account access survive
+- Open a direct blocked route while a site wait or hard lock is active; navigation must wait until Airlock allows access
+- Turn Restrictions off and verify content is restored, while tracked-site usage and an active manual cooldown retain their documented behavior
+- Test selected controls against your logged-in site layouts; record any unrecognized surfaces rather than assuming fixture coverage proves live coverage
 
 ### Daily lock
 - Enable **Daily lock** and choose different start and end times
@@ -149,55 +204,45 @@ After making source changes, run `npm run build` and reload the extension.
 
 ## Architecture
 
-```
-popup.js          <-- Config UI (toggle, delay, site list)
-    | storage.local
-background.js     <-- Session management, focus tracking, badge
-    | messages
-content.js        <-- Overlay rendering, countdown timer, visibility detection
-    ^
-shared/daily-lock.js  <-- Daily schedule calculation shared with the popup
-```
+- **`background/background.js`** owns settings validation, revision checks, guarded holds, timer sessions, usage totals and schedule boundaries. Supported-site navigation notifications trigger content reconciliation.
+- **`shared/content-controls.js`** defines the versioned control schema, catalog, presets and restriction comparisons. **`shared/settings-client.js`** provides the shared popup/options messaging client.
+- **`content/content.js`** owns the existing overlay and usage clock. **`shared/page-state.js`** shares readiness, the active core gate and redirect status with the content runtime.
+- **`content/controls/runtime.js`** owns reversible DOM effects, media suppression, mutation observation and guarded redirects. Independent adapters under **`content/controls/sites/`** identify site elements and propose destinations; they do not create their own timers or observers.
+- **`popup/`** and **`options/`** present settings through the background command API. They do not write configuration directly to storage.
 
-- **popup.js** reads/writes config to `storage.local`
-- **background.js** manages timer sessions in `storage.session`, tracks tab/window focus, updates the badge count
-- **content.js** checks if the current site is tracked, requests session state from background, injects a Shadow DOM overlay, and pauses/resumes based on visibility
+The interface and file boundaries are documented in [CONTENT_CONTROLS_CONTRACT.md](CONTENT_CONTROLS_CONTRACT.md).
 
 ## Permissions
 
 | Permission | Reason |
 |---|---|
-| `storage` | Persist config and timer sessions locally |
-| `activeTab` | Read current tab URL for the "Track this site" button |
-| `alarms` | Apply delayed settings changes, midnight tab resets, daily lock boundaries, and cooldown expiry |
+| `storage` | Persist configuration, daily usage and timer sessions locally |
+| `activeTab` | Read the current tab URL for the popup's current-site actions |
+| `alarms` | Handle midnight resets, daily-lock boundaries and cooldown expiry |
+| `webNavigation` | Re-evaluate supported-site controls after top-frame page and History API navigation |
+| Site access | Run the core overlay on tracked websites and apply optional controls on YouTube, Instagram and Facebook |
 
-## Project Structure
+## Project structure
 
-```
-manifest.json          Base manifest used by the Chrome build
-firefox/
-  manifest.json        Authored Firefox manifest for AMO packaging
-background/
-  background.js        Service worker: sessions, focus, badge, messages
-content/
-  content.js           Overlay, countdown timer, visibility handling
-shared/
-  daily-lock.js        Daily lock validation and local-time boundary calculation
-tests/
-  *.test.js            Schedule and background integration tests
-popup/
-  popup.html           Config UI structure
-  popup.css            Popup styling
-  popup.js             Config read/write logic
-icons/                 Extension icons (16, 48, 128px)
-scripts/
-  build.js             Build script for Chrome/Firefox
+```text
+manifest.json                 Chrome build's base manifest
+firefox/manifest.json         Authored Firefox manifest
+background/background.js     Settings authority, sessions and usage
+content/content.js           Core overlay and focused-time clock
+content/controls/runtime.js  Shared content-control lifecycle
+content/controls/sites/      YouTube, Instagram and Facebook adapters
+shared/                      Schedule, catalog, state and settings UI helpers
+popup/                       Compact current-site controls
+options/                     Full settings page
+scripts/                     Build, packaging and verification tooling
+tests/                       Policy, runtime, adapter, UI and package tests
+licenses/                    Third-party notices and license texts
 ```
 
 ## Privacy
 
-Airlock collects no data. All storage is local to your device. See [PRIVACY.md](PRIVACY.md) for details.
+Airlock stores settings and tracked-site usage locally and sends no analytics or telemetry. See [PRIVACY.md](PRIVACY.md) for details.
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE) for details.
+This project is licensed under GPL-3.0-only. Selected YouTube and Facebook logic is adapted from MIT-licensed projects, with attribution in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The Instagram adapter is an original implementation; no IGPlus source is included. See [LICENSE](LICENSE) for the project license.

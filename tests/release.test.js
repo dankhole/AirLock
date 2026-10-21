@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const { checkVersion, bumpVersion, prepareFirefox } = require("../scripts/release.js");
+const { noticeFiles } = require("../scripts/package-files.js");
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "airlock-release-"));
@@ -15,15 +16,24 @@ function fixture(t) {
     "manifest.json": { version: "1.0.12" },
     "firefox/manifest.json": {
       version: "1.0.12",
+      background: { scripts: ["background/source.txt", "shared/source.txt"] },
+      content_scripts: [{matches:["<all_urls>"],js:["content/source.txt"]}],
+      action: { default_popup:"popup/source.txt" },
+      options_ui: {page:"options/source.txt"},
+      icons: {16:"icons/source.txt"},
       browser_specific_settings: { gecko: { id: "airlock@dankhole" } },
     },
   };
   for (const [file, value] of Object.entries(files)) {
     fs.writeFileSync(path.join(root, file), JSON.stringify(value));
   }
-  for (const directory of ["background", "content", "popup", "shared", "icons"]) {
+  for (const directory of ["background", "content", "popup", "shared", "icons", "options"]) {
     fs.mkdirSync(path.join(root, directory));
     fs.writeFileSync(path.join(root, directory, "source.txt"), `authored ${directory}\n`);
+  }
+  for (const file of noticeFiles) {
+    fs.mkdirSync(path.dirname(path.join(root,file)), {recursive:true});
+    fs.writeFileSync(path.join(root,file), `notice ${file}\n`);
   }
   return root;
 }
@@ -63,7 +73,7 @@ test("Firefox staging preserves authored files and drops hidden and stale files"
   fs.writeFileSync(path.join(staging, "stale.js"), "exclude");
   const notes = 'Fix "pause" behavior.\nSecond line with `code` and $literal.';
   prepareFirefox(root, "v1.0.12", notes);
-  assert.deepEqual(fs.readdirSync(staging).sort(), ["background", "content", "icons", "manifest.json", "popup", "shared"]);
+  assert.deepEqual(fs.readdirSync(staging).sort(), ["LICENSE", "THIRD_PARTY_NOTICES.md", "background", "content", "icons", "licenses", "manifest.json", "options", "popup", "shared"]);
   assert.deepEqual(fs.readFileSync(path.join(staging, "manifest.json")), fs.readFileSync(path.join(root, "firefox", "manifest.json")));
   assert.deepEqual(fs.readdirSync(path.join(staging, "popup")), ["source.txt"]);
   assert.equal(fs.readFileSync(path.join(staging, "popup", "source.txt"), "utf8"), "authored popup\n");
@@ -77,4 +87,14 @@ test("a different add-on ID is rejected before preparing a submission", (t) => {
   fs.writeFileSync(path.join(root, "firefox", "manifest.json"), '{"version":"1.0.12"}');
   assert.throws(() => prepareFirefox(root), /existing airlock@dankhole/);
   assert.equal(fs.existsSync(path.join(root, "store")), false);
+});
+
+
+test("Firefox staging rejects missing runtime dependencies without deleting previous staging", (t) => {
+  const root = fixture(t);
+  prepareFirefox(root);
+  const staging = path.join(root,"store","firefox-source");
+  fs.unlinkSync(path.join(root,"options","source.txt"));
+  assert.throws(() => prepareFirefox(root), /Required package asset is missing: options/);
+  assert.equal(fs.readFileSync(path.join(staging,"options","source.txt"),"utf8"),"authored options\n");
 });

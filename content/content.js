@@ -3,6 +3,31 @@
 // Wait timers only tick while the tab is visible and window is focused.
 
 (async function () {
+  const previousController = globalThis.AirlockCoreController;
+  if (previousController && typeof previousController.dispose === "function") previousController.dispose();
+  let disposed = false;
+  let disposeController = () => {};
+  const controller = { dispose() { if (!disposed) { disposed = true; disposeController(); } } };
+  globalThis.AirlockCoreController = controller;
+  const pageState = globalThis.AirlockPageState || null;
+  if (pageState) pageState.setCore({ ready: false, coreMode: "unknown" });
+  const cleanup = [];
+  disposeController = () => {
+    if (pageState) pageState.setCore({ ready: false, coreMode: "unknown" });
+    for (const callback of cleanup.splice(0)) callback();
+  };
+  function listen(target, type, callback, options) {
+    const guarded = (...args) => { if (!disposed) callback(...args); };
+    target.addEventListener(type, guarded, options);
+    cleanup.push(() => {
+      if (typeof target.removeEventListener === "function") target.removeEventListener(type, guarded, options);
+    });
+  }
+  function listenBrowser(event, callback) {
+    const guarded = (...args) => { if (!disposed) return callback(...args); };
+    event.addListener(guarded);
+    cleanup.push(() => { if (typeof event.removeListener === "function") event.removeListener(guarded); });
+  }
   const TIMER_TICK_MS = 250;
   const DAILY_USAGE_TICK_MS = 1000;
   const MOVING_TARGET_SPEED_X = 38;
@@ -10,44 +35,70 @@
   const MOVING_TARGET_VIEWPORT_PADDING = 16;
 
   const hostname = window.location.hostname;
-  if (!hostname) return;
-
-  let config;
-  try {
-    config = await browser.storage.local.get([
-      "enabled",
-      "sites",
-      "movingTargetEnabled"
-    ]);
-  } catch (e) {
-    console.warn("[Airlock] Failed to read config:", e);
+  if (!hostname) {
+    if (pageState) pageState.setCore({ ready: true, coreMode: "none" });
     return;
   }
 
-  const sites = config.sites || [];
-  const initiallyTracked = sites.some(
-    (site) => hostname === site || hostname.endsWith("." + site)
-  );
-  let response = {
-    type: "NO_OVERLAY",
-    active: false,
-    dailyLimitMinutes: null,
-    dailyLimitMode: "block",
-    dailyUsageRemainingMs: null,
-    dailyUsageResetAt: null
-  };
-
-  if (initiallyTracked) {
-    try {
-      response = await browser.runtime.sendMessage({
-        type: "CONTENT_READY",
-        domain: hostname
-      });
-    } catch (e) {
-      console.warn("[Airlock] Failed to contact background:", e);
+  let bootstrapRetryTimeout = null;
+  let resolveBootstrapRetry = null;
+  cleanup.push(() => {
+    if (bootstrapRetryTimeout !== null) clearTimeout(bootstrapRetryTimeout);
+    if (resolveBootstrapRetry) resolveBootstrapRetry();
+  });
+  function retryBootstrap() {
+    return new Promise((resolve) => {
+      resolveBootstrapRetry = resolve;
+      bootstrapRetryTimeout = setTimeout(() => {
+        bootstrapRetryTimeout = null;
+        resolveBootstrapRetry = null;
+        resolve();
+      }, 5000);
+    });
+  }
+  let bootstrapRevision = 0;
+  listenBrowser(browser.storage.onChanged, (changes, areaName) => {
+    if (areaName === "local" && ["configRevision", "enabled", "sites", "movingTargetEnabled", "cooldownUntil", "dailyLockEnabled", "dailyLockStart", "dailyLockEnd", "dailyLimitMinutes", "siteDailyLimits", "siteWaitEnabled"].some((key) => key in changes)) {
+      bootstrapRevision += 1;
     }
+  });
+  let config;
+  let initiallyTracked;
+  let coreConfigAuthoritative;
+  let response;
+  // Settings events can arrive while startup storage/background reads are pending.
+  // Repeat those reads instead of publishing a stale allowed gate.
+  while (!disposed) {
+    const expectedBootstrapRevision = bootstrapRevision;
+    try {
+      config = await browser.storage.local.get(["enabled", "sites", "movingTargetEnabled"]);
+    } catch (e) {
+      if (disposed) return;
+      console.warn("[Airlock] Failed to read config:", e);
+      await retryBootstrap();
+      continue;
+    }
+    if (disposed) return;
+    const sites = config.sites || [];
+    initiallyTracked = sites.some((site) => hostname === site || hostname.endsWith("." + site));
+    coreConfigAuthoritative = !initiallyTracked;
+    response = {
+      type: "NO_OVERLAY", active: false, dailyLimitMinutes: null, dailyLimitMode: "block",
+      dailyUsageRemainingMs: null, dailyUsageResetAt: null
+    };
+    if (initiallyTracked) {
+      try {
+        response = await browser.runtime.sendMessage({ type: "CONTENT_READY", domain: hostname });
+        coreConfigAuthoritative = Boolean(response && ["NO_OVERLAY", "SHOW_OVERLAY", "SHOW_DAILY_LOCK", "SHOW_DAILY_LIMIT", "SHOW_COOLDOWN"].includes(response.type));
+      } catch (e) {
+        console.warn("[Airlock] Failed to contact background:", e);
+      }
+    }
+    if (disposed) return;
+    if (bootstrapRevision === expectedBootstrapRevision) break;
   }
 
+  if (disposed) return;
   const shouldShowTimer = response && response.type === "SHOW_OVERLAY";
   const shouldShowDailyLock = response && response.type === "SHOW_DAILY_LOCK";
   const shouldShowDailyLimit = response && response.type === "SHOW_DAILY_LIMIT";
@@ -86,6 +137,10 @@
   let hoverTargetEngaged = false;
   let hoverTargetPointerInside = false;
   let hoverTargetPressed = false;
+  let hoverTargetKeyboardPressed = false;
+  let focusBeforeOverlay = null;
+  let overlayFadeTimeout = null;
+  let overlayFadeFrame = null;
   let running = false;
   let lastTick = Date.now();
   let timerTimeout = null;
@@ -125,6 +180,32 @@
   let lastTimerPaused = null;
   let lastContinueVisible = null;
 
+  function publishCoreState() {
+    if (pageState && !disposed) pageState.setCore({
+      ready: coreConfigAuthoritative,
+      coreMode: coreConfigAuthoritative ? (overlayMode || "none") : "unknown"
+    });
+  }
+
+  disposeController = () => {
+    if (pageState) pageState.setCore({ ready: false, coreMode: "unknown" });
+    clearTimerTimeout(); clearDailyLockTimeout(); stopActiveStatePolling(); stopDailyUsageTracking();
+    stopMovingTargetAnimation();
+    if (overlayFadeTimeout !== null) clearTimeout(overlayFadeTimeout);
+    if (overlayFadeFrame !== null) cancelAnimationFrame(overlayFadeFrame);
+    dismissUsageReminder(); removeOverlayElement();
+    for (const callback of cleanup.splice(0)) callback();
+  };
+  if (pageState) {
+    cleanup.push(pageState.subscribe((next, previous) => {
+      if (disposed || next.navigationPending === previous.navigationPending) return;
+      // A redirect gap is never backfilled by the single usage clock.
+      dailyUsageTickAt = Date.now();
+      if (next.navigationPending) stopDailyUsageTracking();
+      else startDailyUsageTracking();
+    }));
+  }
+
   // --- Usage Reminder ---
 
   function dismissUsageReminder() {
@@ -135,6 +216,7 @@
   }
 
   function showUsageReminder(reminder) {
+    if (disposed) return;
     if (
       overlayMode !== null ||
       !reminder ||
@@ -312,6 +394,11 @@
           flex: 0 0 auto;
         }
         .hover-target {
+          border: 0;
+          padding: 0;
+          color: inherit;
+          background: transparent;
+          appearance: none;
           width: 168px;
           height: 168px;
           display: flex;
@@ -321,6 +408,11 @@
           border-radius: 50%;
           contain: layout style paint;
           touch-action: none;
+        }
+        .hover-target:focus-visible,
+        .continue-btn:focus-visible {
+          outline: 3px solid white;
+          outline-offset: 5px;
         }
         .hover-target.moving {
           z-index: 1;
@@ -444,21 +536,22 @@
           opacity: 0.4;
         }
       </style>
-      <div class="backdrop">
+      <div class="backdrop" role="dialog" aria-modal="true" aria-label="Airlock access gate" tabindex="-1">
         <div class="card">
           <div class="hover-target-slot" id="hover-target-slot">
-            <div class="hover-target" id="hover-target" title="Hover to run timer">
-              <div class="breathing-circle"></div>
-            </div>
+            <button class="hover-target" id="hover-target" type="button" aria-label="Hold Space or Enter, hover, or press and hold to run the wait timer" title="Hover or hold to run timer">
+              <span class="breathing-circle"></span>
+            </button>
           </div>
           <div class="message" id="overlay-message">Take a moment...</div>
           <div class="timer" id="timer-display">0:00</div>
           <div class="paused-label" id="paused-label"></div>
-          <button class="continue-btn" id="continue-btn">Continue</button>
+          <button class="continue-btn" id="continue-btn" type="button" disabled tabindex="-1">Continue</button>
         </div>
       </div>
     `;
 
+    focusBeforeOverlay = document.activeElement;
     document.documentElement.appendChild(host);
     overlay = host;
 
@@ -469,7 +562,29 @@
     continueBtn = shadowRoot.getElementById("continue-btn");
     hoverTarget = shadowRoot.getElementById("hover-target");
     hoverTargetSlot = shadowRoot.getElementById("hover-target-slot");
-    continueBtn.addEventListener("click", () => dismissOverlay());
+    continueBtn.addEventListener("click", () => {
+      if (overlayMode === "timer" && remainingMs <= 0 && !continueBtn.disabled) dismissOverlay();
+    });
+    hoverTarget.addEventListener("keydown", (event) => {
+      if (![" ", "Spacebar", "Enter"].includes(event.key) || overlayMode !== "timer" || remainingMs <= 0) return;
+      event.preventDefault();
+      if (event.repeat || hoverTargetKeyboardPressed) return;
+      hoverTargetKeyboardPressed = true;
+      syncMovingTargetAnimation();
+      updateHoverTargetGate();
+    });
+    hoverTarget.addEventListener("keyup", (event) => {
+      if (![" ", "Spacebar", "Enter"].includes(event.key)) return;
+      event.preventDefault();
+      hoverTargetKeyboardPressed = false;
+      syncMovingTargetAnimation();
+      updateHoverTargetGate();
+    });
+    hoverTarget.addEventListener("blur", () => {
+      hoverTargetKeyboardPressed = false;
+      syncMovingTargetAnimation();
+      updateHoverTargetGate();
+    });
     hoverTarget.addEventListener("pointerenter", (event) => {
       setHoverTargetPointerInside(event.pointerType !== "touch");
     });
@@ -495,12 +610,21 @@
     updateDisplay();
     syncMovingTargetAnimation();
 
-    // Trigger fade-in on next frame
-    requestAnimationFrame(() => {
+    focusOverlay();
+    // Trigger fade-in on next frame.
+    overlayFadeFrame = requestAnimationFrame(() => {
+      overlayFadeFrame = null;
       if (backdrop && overlayMode !== null) {
         backdrop.classList.add("visible");
       }
     });
+  }
+
+  function focusOverlay() {
+    const target = overlayMode === "timer"
+      ? (remainingMs > 0 ? hoverTarget : continueBtn)
+      : backdrop;
+    if (target && typeof target.focus === "function") target.focus({ preventScroll: true });
   }
 
   function formatTime(ms) {
@@ -611,15 +735,22 @@
   }
 
   function setContinueVisible(visible) {
+    if (hoverTarget) {
+      hoverTarget.disabled = overlayMode !== "timer" || remainingMs <= 0;
+      hoverTarget.tabIndex = hoverTarget.disabled ? -1 : 0;
+    }
     if (lastContinueVisible === visible) return;
 
     lastContinueVisible = visible;
+    continueBtn.disabled = !visible;
+    continueBtn.tabIndex = visible ? 0 : -1;
     continueBtn.classList.toggle("visible", visible);
+    if (visible && shadowRoot && shadowRoot.activeElement === hoverTarget) focusOverlay();
   }
 
   function getPausedLabel() {
     if (!isHoverTargetSatisfied() && backgroundActive && isPageActive()) {
-      return "Hover the circle";
+      return "Hover, hold Space/Enter, or press the circle";
     }
 
     return "Paused";
@@ -638,6 +769,8 @@
     running = false;
     overlayMode = null;
     dailyLockUntil = null;
+    resetHoverTargetGate();
+    if (!notifyDone || dismissedMode !== "timer") publishCoreState();
 
     const removeDismissedOverlay = () => {
       if (overlay === dismissedOverlay && overlayMode === null) {
@@ -650,23 +783,37 @@
       // Wait for fade-out transition then remove
       backdrop.addEventListener("transitionend", removeDismissedOverlay, { once: true });
       // Fallback if transitionend doesn't fire
-      setTimeout(removeDismissedOverlay, 300);
+      if (overlayFadeTimeout !== null) clearTimeout(overlayFadeTimeout);
+      overlayFadeTimeout = setTimeout(() => {
+        overlayFadeTimeout = null;
+        removeDismissedOverlay();
+      }, 300);
     } else {
       removeDismissedOverlay();
     }
 
     if (notifyDone && dismissedMode === "timer") {
       try {
-        browser.runtime.sendMessage({ type: "TIMER_DONE" });
+        Promise.resolve(browser.runtime.sendMessage({ type: "TIMER_DONE" }))
+          .then((result) => {
+            if (disposed || overlayMode !== null) return;
+            if (pageState && (!result || result.ok !== true)) { recheckConfig(); return; }
+            publishCoreState();
+            startDailyUsageTracking();
+          })
+          .catch(() => { if (!disposed) recheckConfig(); });
       } catch {
-        // Extension context may be invalidated
+        if (!disposed) recheckConfig();
       }
-      startDailyUsageTracking();
     }
   }
 
   function removeOverlayElement() {
+    const shouldRestoreFocus = document.activeElement === overlay;
     if (overlay) overlay.remove();
+    if (shouldRestoreFocus && focusBeforeOverlay && focusBeforeOverlay.isConnected &&
+        typeof focusBeforeOverlay.focus === "function") focusBeforeOverlay.focus({ preventScroll: true });
+    focusBeforeOverlay = null;
     overlay = null;
     shadowRoot = null;
     messageEl = null;
@@ -684,12 +831,15 @@
   }
 
   function showOverlay(nextRemainingMs, active = backgroundActive) {
+    if (disposed) return;
+    coreConfigAuthoritative = true;
     dismissUsageReminder();
     clearTimerTimeout();
     clearDailyLockTimeout();
     stopDailyUsageTracking();
 
     overlayMode = "timer";
+    publishCoreState();
     dailyLockUntil = null;
     remainingMs = nextRemainingMs;
     backgroundActive = active !== false;
@@ -703,6 +853,7 @@
       updateDisplay();
     }
 
+    focusOverlay();
     if (remainingMs > 0) {
       startTimer();
       startActiveStatePolling();
@@ -726,6 +877,8 @@
   }
 
   function showHardLock(mode, unlockAt) {
+    if (disposed) return;
+    coreConfigAuthoritative = true;
     dismissUsageReminder();
     if (overlayMode === "timer") {
       setRunning(false, { persistPaused: true });
@@ -737,11 +890,13 @@
     stopActiveStatePolling();
     stopDailyUsageTracking();
     overlayMode = mode;
+    publishCoreState();
     dailyLockUntil = unlockAt;
     running = false;
     hoverTargetEngaged = false;
     hoverTargetPointerInside = false;
     hoverTargetPressed = false;
+    hoverTargetKeyboardPressed = false;
 
     if (!overlay) {
       createOverlay();
@@ -751,6 +906,7 @@
       updateDisplay();
     }
 
+    focusOverlay();
     scheduleDailyLockRelease();
   }
 
@@ -820,7 +976,8 @@
       hoverTarget &&
       hoverTargetSlot &&
       overlayMode === "timer" &&
-      remainingMs > 0
+      remainingMs > 0 &&
+      !hoverTargetKeyboardPressed
     );
   }
 
@@ -928,7 +1085,7 @@
   function updateHoverTargetGate() {
     const nextEngaged =
       overlayMode === "timer" &&
-      (hoverTargetPointerInside || hoverTargetPressed);
+      (hoverTargetPointerInside || hoverTargetPressed || hoverTargetKeyboardPressed);
     if (hoverTargetEngaged !== nextEngaged) {
       hoverTargetEngaged = nextEngaged;
       updateHoverTargetState();
@@ -957,6 +1114,8 @@
   function resetHoverTargetGate() {
     hoverTargetPointerInside = false;
     hoverTargetPressed = false;
+    hoverTargetKeyboardPressed = false;
+    syncMovingTargetAnimation();
     updateHoverTargetGate();
   }
 
@@ -1046,6 +1205,7 @@
       hoverTargetEngaged = false;
       hoverTargetPointerInside = false;
       hoverTargetPressed = false;
+      hoverTargetKeyboardPressed = false;
       updateHoverTargetState();
     }
     setRunning(canRunTimer(), { persistPaused: true });
@@ -1077,6 +1237,7 @@
     browser.runtime
       .sendMessage({ type: "GET_ACTIVE_STATE" })
       .then((state) => {
+        if (disposed) return;
         if (state && typeof state.active === "boolean") {
           setBackgroundActive(state.active);
         }
@@ -1121,7 +1282,8 @@
 
   function startDailyUsageTracking() {
     stopDailyUsageTracking();
-    if (!dailyUsageTrackingEnabled || overlayMode !== null) return;
+    if (disposed || !dailyUsageTrackingEnabled || overlayMode !== null ||
+        (pageState && pageState.get().navigationPending)) return;
 
     dailyUsageTickAt = Date.now();
     dailyUsageInterval = setInterval(reportDailyUsage, DAILY_USAGE_TICK_MS);
@@ -1140,7 +1302,8 @@
     const previousTickAt = dailyUsageTickAt || now;
 
     if (
-      overlayMode !== null ||
+      disposed || overlayMode !== null ||
+      (pageState && pageState.get().navigationPending) ||
       document.visibilityState !== "visible" ||
       document.hidden ||
       !backgroundActive
@@ -1156,6 +1319,7 @@
 
     dailyUsageTickAt = now;
     dailyUsageUpdateInFlight = true;
+    const expectedConfigRevision = bootstrapRevision;
     browser.runtime
       .sendMessage({
         type: "DAILY_USAGE_UPDATE",
@@ -1163,7 +1327,11 @@
         elapsedMs: elapsedMs
       })
       .then((result) => {
-        if (!result || result.ok !== true) return;
+        if (disposed || !result || result.ok !== true) return;
+        if (expectedConfigRevision !== bootstrapRevision) {
+          if (result.reached) recheckConfig();
+          return;
+        }
         dailyUsageRemainingMs = Number.isFinite(result.remainingMs)
           ? result.remainingMs
           : dailyUsageRemainingMs;
@@ -1185,6 +1353,11 @@
   }
 
   function applyConfigResponse(nextResponse) {
+    if (disposed) return;
+    if (!nextResponse || !["NO_OVERLAY", "SHOW_OVERLAY", "SHOW_DAILY_LOCK", "SHOW_DAILY_LIMIT", "SHOW_COOLDOWN"].includes(nextResponse.type)) {
+      throw new Error("Core gate response unavailable");
+    }
+    coreConfigAuthoritative = true;
     if (nextResponse && nextResponse.type === "SHOW_COOLDOWN") {
       showCooldown(nextResponse.unlockAt);
       return;
@@ -1214,12 +1387,15 @@
   }
 
   function recheckConfig() {
+    if (disposed) return;
     if (configRecheckInFlight) {
       configRecheckPending = true;
       return;
     }
 
     configRecheckInFlight = true;
+    coreConfigAuthoritative = false;
+    if (pageState) pageState.setCore({ ready: false, coreMode: "unknown" });
     if (overlayMode === "timer") {
       pauseTimer();
     }
@@ -1229,9 +1405,12 @@
         type: "CONTENT_READY",
         domain: hostname
       })
-      .then(applyConfigResponse)
+      .then((nextResponse) => {
+        // A newer settings event supersedes this response before the gate can reopen.
+        if (!configRecheckPending) applyConfigResponse(nextResponse);
+      })
       .catch(() => {
-        if (["dailyLock", "dailyLimit", "cooldown"].includes(overlayMode)) {
+        if (!disposed && (pageState || ["dailyLock", "dailyLimit", "cooldown"].includes(overlayMode))) {
           clearDailyLockTimeout();
           dailyLockTimeout = setTimeout(recheckConfig, 5000);
         }
@@ -1247,7 +1426,7 @@
 
   // --- Visibility / Focus Handling ---
 
-  document.addEventListener("visibilitychange", () => {
+  listen(document, "visibilitychange", () => {
     if (document.hidden) {
       resetHoverTargetGate();
       pauseTimer();
@@ -1256,11 +1435,24 @@
     }
   });
 
-  window.addEventListener("blur", () => {
+  listen(window, "blur", () => {
     resetHoverTargetGate();
     pauseTimer();
   });
-  window.addEventListener("focus", () => resumeTimer());
+  listen(window, "focus", () => resumeTimer());
+  listen(document, "keydown", (event) => {
+    if (!overlay || overlayMode === null || event.key !== "Tab") return;
+    event.preventDefault();
+    focusOverlay();
+  }, true);
+  listen(document, "focusin", (event) => {
+    if (overlay && overlayMode !== null && event.target !== overlay &&
+        !(typeof overlay.contains === "function" && overlay.contains(event.target))) focusOverlay();
+  }, true);
+  listen(window, "pagehide", () => {
+    resetHoverTargetGate(); pauseTimer(); stopDailyUsageTracking();
+  });
+  listen(window, "pageshow", () => { dailyUsageTickAt = Date.now(); recheckConfig(); });
 
   if (reducedMotionQuery) {
     const handleReducedMotionChange = () => {
@@ -1268,13 +1460,23 @@
       syncMovingTargetAnimation();
     };
     if (typeof reducedMotionQuery.addEventListener === "function") {
-      reducedMotionQuery.addEventListener("change", handleReducedMotionChange);
+      listen(reducedMotionQuery, "change", handleReducedMotionChange);
     } else if (typeof reducedMotionQuery.addListener === "function") {
       reducedMotionQuery.addListener(handleReducedMotionChange);
+      cleanup.push(() => {
+        if (typeof reducedMotionQuery.removeListener === "function") reducedMotionQuery.removeListener(handleReducedMotionChange);
+      });
     }
   }
 
-  browser.runtime.onMessage.addListener((message) => {
+  listenBrowser(browser.runtime.onMessage, (message) => {
+    if (message.type === "AIRLOCK_GET_PAGE_STATE") {
+      return Promise.resolve({
+        ok: true,
+        ...(pageState ? pageState.get() : { ready: false, coreMode: "unknown", navigationPending: false }),
+        runtimeStatus: globalThis.AirlockContentRuntime ? globalThis.AirlockContentRuntime.getStatus() : null
+      });
+    }
     if (message.type === "PAUSE") {
       setBackgroundActive(false);
       pauseTimer();
@@ -1299,7 +1501,7 @@
 
   // --- Extension Toggle Listener ---
 
-  browser.storage.onChanged.addListener((changes, areaName) => {
+  listenBrowser(browser.storage.onChanged, (changes, areaName) => {
     if (areaName === "local" && changes.movingTargetEnabled) {
       movingTargetEnabled = changes.movingTargetEnabled.newValue === true;
       resetHoverTargetGate();
@@ -1317,6 +1519,8 @@
       );
       dailyUsageTrackingEnabled = stillTracked;
       if (!stillTracked) {
+        if (configRecheckInFlight) configRecheckPending = true;
+        coreConfigAuthoritative = true;
         dismissUsageReminder();
         dismissOverlay({ notifyDone: false });
       } else {
@@ -1330,6 +1534,9 @@
   });
 
   // --- Start ---
+
+  publishCoreState();
+  if (!coreConfigAuthoritative) dailyLockTimeout = setTimeout(recheckConfig, 5000);
 
   if (shouldShowCooldown) {
     showCooldown(response.unlockAt);

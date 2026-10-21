@@ -5,6 +5,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const rootDir = path.resolve(__dirname, "..");
+const controlsSource = fs.readFileSync(path.join(rootDir, "shared", "content-controls.js"), "utf8");
 const sharedSource = fs.readFileSync(path.join(rootDir, "shared", "daily-lock.js"), "utf8");
 const backgroundSource = fs.readFileSync(
   path.join(rootDir, "background", "background.js"),
@@ -31,9 +32,17 @@ function selectStoredValues(store, keys) {
   );
 }
 
-function createBrowser(initialConfig, tabs) {
-  const localData = { ...initialConfig };
-  const sessionData = {};
+function reorderObjectKeys(value) {
+  if (Array.isArray(value)) return value.map(reorderObjectKeys);
+  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((key) => [key, reorderObjectKeys(value[key])]));
+  return value;
+}
+
+function createBrowser(initialConfig, tabs, initialSession = {}, options = {}) {
+  const cloneStored = (value) => options.reorderKeys ? reorderObjectKeys(structuredClone(value)) : structuredClone(value);
+  const localData = cloneStored(initialConfig);
+  const localWrites = [];
+  const sessionData = structuredClone(initialSession);
   const alarms = new Map();
   const tabMessages = [];
   const runtimeOnMessage = createEvent();
@@ -41,6 +50,8 @@ function createBrowser(initialConfig, tabs) {
 
   const browser = {
     runtime: {
+      id: "airlock-test",
+      getURL: (entry) => "moz-extension://airlock-test/" + entry,
       onInstalled: createEvent(),
       onStartup: createEvent(),
       onMessage: runtimeOnMessage
@@ -48,10 +59,11 @@ function createBrowser(initialConfig, tabs) {
     storage: {
       local: {
         async get(keys) {
-          return selectStoredValues(localData, keys);
+          return cloneStored(selectStoredValues(localData, keys));
         },
         async set(values) {
-          Object.assign(localData, values);
+          localWrites.push(cloneStored(values));
+          Object.assign(localData, cloneStored(values));
         },
         async remove(keys) {
           const keysToRemove = Array.isArray(keys) ? keys : [keys];
@@ -63,7 +75,7 @@ function createBrowser(initialConfig, tabs) {
           return selectStoredValues(sessionData, keys);
         },
         async set(values) {
-          Object.assign(sessionData, values);
+          Object.assign(sessionData, structuredClone(values));
         },
         async remove(keys) {
           const keysToRemove = Array.isArray(keys) ? keys : [keys];
@@ -94,14 +106,17 @@ function createBrowser(initialConfig, tabs) {
         return tab;
       },
       async sendMessage(tabId, message) {
-        tabMessages.push({ tabId: tabId, message: message });
+        tabMessages.push({ tabId: tabId, message: structuredClone(message) });
       }
     },
+    webNavigation: { onCommitted: createEvent(), onHistoryStateUpdated: createEvent() },
     windows: {
       WINDOW_ID_NONE: -1,
+      focused: true,
       onFocusChanged: createEvent(),
+      async getLastFocused() { return { focused: this.focused }; },
       async get() {
-        return { focused: true };
+        return { focused: this.focused };
       }
     },
     action: {
@@ -112,6 +127,8 @@ function createBrowser(initialConfig, tabs) {
 
   return {
     browser: browser,
+    tabs: tabs,
+    localWrites,
     localData: localData,
     sessionData: sessionData,
     alarms: alarms,
@@ -119,22 +136,61 @@ function createBrowser(initialConfig, tabs) {
   };
 }
 
-async function loadBackground(config) {
-  const tabs = [{ id: 7, active: true, windowId: 1 }];
-  const state = createBrowser(config, tabs);
+async function loadBackground(config, initialSession = {}, options = {}) {
+  const tabs = [{ id: 7, active: true, windowId: 1, url: "https://example.com/" }];
+  const state = createBrowser(config, tabs, initialSession, options);
+  const clock = { now: options.now === undefined ? Date.now() : options.now };
+  class BackgroundDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [clock.now])); }
+    static now() { return clock.now; }
+  }
   const context = vm.createContext({
+    Date: BackgroundDate,
+    URL,
+    crypto: require("node:crypto").webcrypto,
     browser: state.browser,
     console: console,
     setTimeout: setTimeout,
     clearTimeout: clearTimeout
   });
 
+  vm.runInContext(controlsSource, context, { filename: "shared/content-controls.js" });
   vm.runInContext(sharedSource, context, { filename: "shared/daily-lock.js" });
   vm.runInContext(backgroundSource, context, { filename: "background/background.js" });
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 
+  context.testState = state;
+  context.testClock = clock;
+  context.testUiSender = { id: "airlock-test", url: state.browser.runtime.getURL("popup/popup.html") };
+  context.testSequence = 0;
   return { context: context, state: state };
+}
+
+function sendUi(context, message, sender = context.testUiSender) {
+  return new Promise((resolve) => {
+    const listener = context.testState.browser.runtime.onMessage.listeners[0];
+    listener(message, sender, (response) => resolve(structuredClone(response)));
+  });
+}
+
+async function advanceGuard(context, elapsedMs) {
+  let pending = await context.readPendingConfigChange();
+  if (!pending) return null;
+  const progress = (elapsed) => sendUi(context, { type: "ADVANCE_PENDING_CONFIG_CHANGE", pendingId: pending.id,
+    clientId: "test-popup", sequence: ++context.testSequence, elapsedMs: elapsed });
+  if (context.testPendingId !== pending.id) {
+    context.testPendingId = pending.id;
+    await progress(0);
+  }
+  let result;
+  for (let elapsed = 0; elapsed < elapsedMs; elapsed += 1000) {
+    const tick = Math.min(1000, elapsedMs - elapsed);
+    context.testClock.now += tick;
+    result = await progress(tick);
+    if (result.applied) break;
+  }
+  return result;
 }
 
 function formatTime(date) {
@@ -408,7 +464,7 @@ test("a per-site cooldown starts at the limit and resets usage when it expires",
     })
   );
 
-  const before = Date.now();
+  const before = context.testClock.now;
   const usageResponse = await context.handleDailyUsageUpdate(7, "example.com", 1000);
   const cooldownUntil = state.localData.dailyLimitCooldowns["example.com"];
 
@@ -447,10 +503,8 @@ test("switching from a hard block to cooldown requires the settings hold", async
     })
   );
 
-  const response = await context.startPendingConfigChange({
-    type: "changeDailyLimitPolicy",
-    site: "example.com",
-    dailyLimitPolicy: { mode: "cooldown", cooldownMinutes: 60 }
+  const response = await requestPatch(context, {
+    dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 60 } }
   });
 
   assert.equal(response.applied, false);
@@ -468,10 +522,8 @@ test("making a per-site cooldown longer applies immediately", async () => {
     })
   );
 
-  const response = await context.startPendingConfigChange({
-    type: "changeDailyLimitPolicy",
-    site: "example.com",
-    dailyLimitPolicy: { mode: "cooldown", cooldownMinutes: 60 }
+  const response = await requestPatch(context, {
+    dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 60 } }
   });
 
   assert.equal(response.applied, true);
@@ -491,10 +543,8 @@ test("shortening a per-site cooldown requires the settings hold", async () => {
     })
   );
 
-  const response = await context.startPendingConfigChange({
-    type: "changeDailyLimitPolicy",
-    site: "example.com",
-    dailyLimitPolicy: { mode: "cooldown", cooldownMinutes: 15 }
+  const response = await requestPatch(context, {
+    dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 15 } }
   });
 
   assert.equal(response.applied, false);
@@ -507,22 +557,20 @@ test("raising a daily limit uses the guarded settings countdown", async () => {
     baseConfig({ dailyLimits: { "example.com": 30 } })
   );
 
-  const response = await context.startPendingConfigChange({
-    type: "changeDailyLimit",
-    site: "example.com",
-    dailyLimitMinutes: 60
+  const response = await requestPatch(context, {
+    dailyLimits: { "example.com": 60 }
   });
 
   assert.equal(response.ok, true);
   assert.equal(response.applied, false);
-  assert.equal(response.pending.type, "changeDailyLimit");
+  assert.deepEqual(response.pending.patch, { dailyLimits: { "example.com": 60 } });
   assert.equal(response.pending.remainingMs, 60 * 1000);
   assert.equal(state.localData.dailyLimits["example.com"], 30);
 });
 
 test("cooldown blocks tracked sites for an hour even when Airlock is toggled off", async () => {
   const { context, state } = await loadBackground(baseConfig({ enabled: false }));
-  const before = Date.now();
+  const before = context.testClock.now;
 
   const started = await context.startCooldown();
   const response = await context.handleContentReady(7, "example.com");
@@ -538,15 +586,15 @@ test("ending a cooldown early requires the full settings hold", async () => {
   const cooldownUntil = Date.now() + 60 * 60 * 1000;
   const { context, state } = await loadBackground(baseConfig({ cooldownUntil: cooldownUntil }));
 
-  const pending = await context.startPendingConfigChange({ type: "endCooldown" });
+  const pending = await requestPatch(context, { cooldownUntil: null });
   assert.equal(pending.applied, false);
   assert.equal(pending.pending.remainingMs, 60 * 1000);
   assert.equal(state.localData.cooldownUntil, cooldownUntil);
 
-  await context.advancePendingConfigChange(30 * 1000);
+  await advanceGuard(context, 30 * 1000);
   assert.equal(state.localData.cooldownUntil, cooldownUntil);
 
-  await context.advancePendingConfigChange(30 * 1000);
+  await advanceGuard(context, 30 * 1000);
   assert.equal(state.localData.cooldownUntil, null);
   assert.equal(state.localData.pendingConfigChange, undefined);
 });
@@ -560,19 +608,17 @@ test("daily lock schedule reductions are guarded and strict expansions apply imm
     })
   );
 
-  const shorter = await context.startPendingConfigChange({
-    type: "changeDailyLockSchedule",
+  const shorter = await requestPatch(context, {
     dailyLockStart: "23:00",
     dailyLockEnd: "07:00"
   });
   assert.equal(shorter.applied, false);
   assert.equal(state.localData.dailyLockStart, "22:00");
 
-  await context.advancePendingConfigChange(60 * 1000);
+  await advanceGuard(context, 60 * 1000);
   assert.equal(state.localData.dailyLockStart, "23:00");
 
-  const longer = await context.startPendingConfigChange({
-    type: "changeDailyLockSchedule",
+  const longer = await requestPatch(context, {
     dailyLockStart: "21:00",
     dailyLockEnd: "08:00"
   });
@@ -591,8 +637,7 @@ test("shifting a daily lock is guarded even when its duration does not shrink", 
     })
   );
 
-  const shifted = await context.startPendingConfigChange({
-    type: "changeDailyLockSchedule",
+  const shifted = await requestPatch(context, {
     dailyLockStart: "21:00",
     dailyLockEnd: "06:00"
   });
@@ -607,16 +652,14 @@ test("turning off the moving target requires the settings hold", async () => {
     baseConfig({ delayMinutes: 7, settingsDelayMinutes: 2, movingTargetEnabled: true })
   );
 
-  const response = await context.startPendingConfigChange({
-    type: "disableMovingTarget"
-  });
+  const response = await requestPatch(context, { movingTargetEnabled: false });
 
   assert.equal(response.applied, false);
   assert.equal(response.pending.remainingMs, 2 * 60 * 1000);
   assert.equal(state.localData.movingTargetEnabled, true);
 
-  await context.advancePendingConfigChange(60 * 1000);
-  await context.advancePendingConfigChange(60 * 1000);
+  await advanceGuard(context, 60 * 1000);
+  await advanceGuard(context, 60 * 1000);
   assert.equal(state.localData.movingTargetEnabled, false);
 });
 
@@ -624,28 +667,28 @@ test("site removal, wait reduction, daily-limit removal, and daily-lock disablin
   const cases = [
     {
       config: baseConfig(),
-      change: { type: "removeSite", site: "example.com" },
+      patch: { sites: [] },
       assertUnchanged(state) {
         assert.deepEqual(state.localData.sites, ["example.com"]);
       }
     },
     {
       config: baseConfig({ delayMinutes: 2 }),
-      change: { type: "reduceDelay", delayMinutes: 1 },
+      patch: { delayMinutes: 1 },
       assertUnchanged(state) {
         assert.equal(state.localData.delayMinutes, 2);
       }
     },
     {
       config: baseConfig({ dailyLimits: { "example.com": 30 } }),
-      change: { type: "changeDailyLimit", site: "example.com", dailyLimitMinutes: null },
+      patch: { dailyLimits: { "example.com": null } },
       assertUnchanged(state) {
         assert.equal(state.localData.dailyLimits["example.com"], 30);
       }
     },
     {
       config: baseConfig({ dailyLockEnabled: true }),
-      change: { type: "disableDailyLock" },
+      patch: { dailyLockEnabled: false },
       assertUnchanged(state) {
         assert.equal(state.localData.dailyLockEnabled, true);
       }
@@ -654,10 +697,10 @@ test("site removal, wait reduction, daily-limit removal, and daily-lock disablin
 
   for (const testCase of cases) {
     const { context, state } = await loadBackground(testCase.config);
-    const response = await context.startPendingConfigChange(testCase.change);
+    const response = await requestPatch(context, testCase.patch);
 
-    assert.equal(response.applied, false, testCase.change.type);
-    assert.ok(response.pending.remainingMs > 0, testCase.change.type);
+    assert.equal(response.applied, false, JSON.stringify(testCase.patch));
+    assert.ok(response.pending.remainingMs > 0, JSON.stringify(testCase.patch));
     testCase.assertUnchanged(state);
   }
 });
@@ -668,7 +711,7 @@ test("the settings hold is independent from the site wait", async () => {
   );
 
   const siteWait = await context.handleContentReady(7, "example.com");
-  const disable = await context.startPendingConfigChange({ type: "disableAirlock" });
+  const disable = await requestPatch(context, { enabled: false });
   assert.equal(siteWait.remainingMs, 3 * 60 * 1000);
   assert.equal(disable.pending.remainingMs, 4 * 60 * 1000);
   assert.equal(state.localData.enabled, true);
@@ -679,20 +722,63 @@ test("reducing the settings hold uses its previous duration without changing the
     baseConfig({ delayMinutes: 8, settingsDelayMinutes: 2 })
   );
 
-  const response = await context.startPendingConfigChange({
-    type: "reduceSettingsDelay",
-    settingsDelayMinutes: 1
-  });
+  const response = await requestPatch(context, { settingsDelayMinutes: 1 });
 
   assert.equal(response.applied, false);
   assert.equal(response.pending.remainingMs, 2 * 60 * 1000);
   assert.equal(state.localData.settingsDelayMinutes, 2);
   assert.equal(state.localData.delayMinutes, 8);
 
-  await context.advancePendingConfigChange(60 * 1000);
-  await context.advancePendingConfigChange(60 * 1000);
+  await advanceGuard(context, 60 * 1000);
+  await advanceGuard(context, 60 * 1000);
   assert.equal(state.localData.settingsDelayMinutes, 1);
   assert.equal(state.localData.delayMinutes, 8);
+});
+
+test("a zero-minute settings hold survives normalization and applies mixed changes immediately", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({ delayMinutes: 8, settingsDelayMinutes: 0 })
+  );
+
+  assert.equal(state.localData.settingsDelayMinutes, 0);
+  assert.equal((await context.readConfig()).settingsDelayMinutes, 0);
+  await context.migrateStoredConfig();
+  assert.equal(state.localData.settingsDelayMinutes, 0);
+
+  const response = await requestPatch(context, { enabled: false, delayMinutes: 9 });
+  assert.equal(response.applied, true);
+  assert.equal(response.pending, null);
+  assert.equal(response.revision, 1);
+  assert.equal(state.localData.enabled, false);
+  assert.equal(state.localData.delayMinutes, 9);
+  assert.equal(state.localData.settingsDelayMinutes, 0);
+  assert.equal(state.localData.pendingConfigChange, undefined);
+
+  const restarted = await loadBackground(state.localData);
+  assert.equal((await restarted.context.readConfig()).settingsDelayMinutes, 0);
+  assert.equal(restarted.state.localData.settingsDelayMinutes, 0);
+});
+
+test("reducing the settings hold to zero still requires the previous hold", async () => {
+  const { context, state } = await loadBackground(
+    baseConfig({ delayMinutes: 8, settingsDelayMinutes: 2 })
+  );
+
+  const response = await requestPatch(context, { settingsDelayMinutes: 0 });
+  assert.equal(response.applied, false);
+  assert.equal(response.pending.remainingMs, 2 * 60 * 1000);
+  assert.equal(state.localData.settingsDelayMinutes, 2);
+
+  await advanceGuard(context, 60 * 1000);
+  assert.equal(state.localData.settingsDelayMinutes, 2);
+  await advanceGuard(context, 60 * 1000);
+  assert.equal(state.localData.settingsDelayMinutes, 0);
+  assert.equal(state.localData.delayMinutes, 8);
+
+  const disabled = await requestPatch(context, { enabled: false });
+  assert.equal(disabled.applied, true);
+  assert.equal(disabled.pending, null);
+  assert.equal(state.localData.enabled, false);
 });
 
 test("the unified wait migrates to both settings when no legacy guard remains", async () => {
@@ -767,11 +853,11 @@ test("sites with wait disabled still enforce locks, cooldowns, and daily limits"
 test("disabling a site's wait is guarded and enabling it again creates a fresh wait", async () => {
   const { context, state } = await loadBackground(baseConfig());
   assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_OVERLAY");
-  const pending = await context.startPendingConfigChange({ type: "disableSiteWait", site: "example.com" });
+  const pending = await requestPatch(context, { siteWaitEnabled: { "example.com": false } });
   assert.equal(pending.applied, false);
-  await context.advancePendingConfigChange(30000);
+  await advanceGuard(context, 30000);
   assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_OVERLAY");
-  await context.advancePendingConfigChange(30000);
+  await advanceGuard(context, 30000);
   assert.equal(state.localData.siteWaitEnabled["example.com"], false);
   assert.equal((await context.handleContentReady(7, "example.com")).type, "NO_OVERLAY");
   assert.deepEqual(state.sessionData, {});
@@ -802,7 +888,369 @@ test("wait preferences default on and follow the most specific tracked domain", 
 
 test("removing a site clears its wait preference", async () => {
   const { context, state } = await loadBackground(baseConfig({ siteWaitEnabled: { "example.com": false } }));
-  await context.startPendingConfigChange({ type: "removeSite", site: "example.com" });
-  await context.advancePendingConfigChange(60000);
+  await requestPatch(context, { sites: [] });
+  await advanceGuard(context, 60000);
   assert.equal(state.localData.siteWaitEnabled["example.com"], undefined);
+});
+
+function requestPatch(context, patch, extra = {}) {
+  return sendUi(context, { type: "REQUEST_CONFIG_CHANGE", expectedRevision: context.testState.localData.configRevision, patch, ...extra });
+}
+
+function advanceMessage(context, pending, clientId, sequence, elapsedMs, sender) {
+  return sendUi(context, { type: "ADVANCE_PENDING_CONFIG_CHANGE", pendingId: pending.id, clientId, sequence, elapsedMs }, sender);
+}
+
+test("all settings commands reject content origins, wrong extension UI paths, and anonymous holds", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  const pending = await requestPatch(context, { enabled: false });
+  const commands = [
+    { type: "GET_SETTINGS_STATE" },
+    { type: "REQUEST_CONFIG_CHANGE", expectedRevision: 0, patch: { enabled: false } },
+    { type: "ADVANCE_PENDING_CONFIG_CHANGE", pendingId: pending.pending.id, clientId: "page", sequence: 1, elapsedMs: 60000 },
+    { type: "CANCEL_PENDING_CONFIG_CHANGE", pendingId: pending.pending.id },
+    { type: "RELEASE_PENDING_CONFIG_CHANGE", pendingId: pending.pending.id, clientId: "page" }
+  ];
+  const senders = [{}, { id: "airlock-test", url: "https://example.com/", tab: state.tabs[0] },
+    { id: "airlock-test", url: state.browser.runtime.getURL("popup/other.html") },
+    { id: "another-extension", url: state.browser.runtime.getURL("popup/popup.html") }];
+  for (const sender of senders) for (const command of commands) {
+    assert.deepEqual(await sendUi(context, command, sender), { ok: false, reason: "untrusted-sender" }, command.type);
+  }
+  assert.equal((await context.advancePendingConfigChange(60000)).reason, "untrusted-sender");
+  assert.equal(state.localData.enabled, true);
+  assert.equal(state.localData.pendingConfigChange.remainingMs, 60000);
+});
+
+test("exact options senders with tab metadata and harmless URL fragments are accepted", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  const sender = { id: "airlock-test", url: state.browser.runtime.getURL("options/options.html") + "?source=popup#youtube", tab: state.tabs[0] };
+  const snapshot = await sendUi(context, { type: "GET_SETTINGS_STATE", tabId: 7 }, sender);
+  assert.equal(snapshot.ok, true);
+  assert.equal(snapshot.currentSiteStatus.reason, "wait");
+  assert.deepEqual(state.sessionData, {});
+  const applied = await sendUi(context, { type: "REQUEST_CONFIG_CHANGE", expectedRevision: snapshot.revision, patch: { delayMinutes: 2 } }, sender);
+  assert.equal(applied.applied, true);
+  assert.equal(applied.revision, snapshot.revision + 1);
+});
+
+test("concurrent edits serialize and stale revisions refresh without overwriting", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  const [first, second] = await Promise.all([
+    requestPatch(context, { contentControls: { youtube: { hideShorts: true } } }),
+    requestPatch(context, { contentControls: { facebook: { hideReels: true } } })
+  ]);
+  assert.equal(first.ok, true);
+  assert.equal(first.applied, true);
+  assert.equal(first.revision, 1);
+  assert.equal(second.ok, false);
+  assert.equal(second.reason, "stale-revision");
+  assert.equal(second.revision, 1);
+  assert.equal(second.config.contentControls.youtube.hideShorts, true);
+  assert.equal(state.localData.contentControls.facebook.hideReels, false);
+  assert.deepEqual(state.localData.sites, ["example.com"]);
+});
+
+test("mixed preset-style patches apply atomically after the full existing hold", async () => {
+  const { context, state } = await loadBackground(baseConfig({ contentControls: { version: 1, youtube: { hideShorts: true } } }));
+  const started = await requestPatch(context, { contentControls: { youtube: { hideShorts: false }, facebook: { hideReels: true } } });
+  assert.equal(started.applied, false);
+  assert.equal(started.revision, 0);
+  assert.equal(state.localData.contentControls.youtube.hideShorts, true);
+  assert.equal(state.localData.contentControls.facebook.hideReels, false);
+  const competing = await requestPatch(context, { delayMinutes: 2 });
+  assert.equal(competing.reason, "pending-exists");
+  await advanceGuard(context, 59000);
+  assert.equal(state.localData.contentControls.youtube.hideShorts, true);
+  assert.equal(state.localData.contentControls.facebook.hideReels, false);
+  const completed = await advanceGuard(context, 1000);
+  assert.equal(completed.applied, true);
+  assert.equal(completed.revision, 1);
+  assert.equal(state.localData.contentControls.youtube.hideShorts, false);
+  assert.equal(state.localData.contentControls.facebook.hideReels, true);
+});
+
+test("per-site maps merge while deliberate site removal cleans maps and retains content preferences and totals", async () => {
+  const { context, state } = await loadBackground(baseConfig({ sites: ["example.com", "other.example"],
+    dailyLimits: { "example.com": 30, "other.example": 20 },
+    siteWaitEnabled: { "example.com": false },
+    dailyUsage: { date: localDateKey(), sites: { "example.com": 10000, "other.example": 5000 } },
+    contentControls: { version: 1, youtube: { hideShorts: true } } }));
+  const strengthened = await requestPatch(context, { dailyLimits: { "example.com": 15 }, siteWaitEnabled: { "example.com": null } });
+  assert.equal(strengthened.applied, true);
+  assert.deepEqual(state.localData.dailyLimits, { "example.com": 15, "other.example": 20 });
+  assert.deepEqual(state.localData.siteWaitEnabled, {});
+  const removal = await requestPatch(context, { sites: ["other.example"] });
+  assert.equal(removal.applied, false);
+  await advanceGuard(context, 60000);
+  assert.deepEqual(state.localData.sites, ["other.example"]);
+  assert.deepEqual(state.localData.dailyLimits, { "other.example": 20 });
+  assert.equal(state.localData.contentControls.youtube.hideShorts, true);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 10000);
+});
+
+test("strict allowlisted patches reject private state, invalid values, and arbitrary cooldown timestamps", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  const patches = [ { configRevision: 100 }, { pendingConfigChange: null }, { dailyUsage: {} }, { enabled: "false" },
+    { delayMinutes: 0 }, { delayMinutes: 1.5 }, { settingsDelayMinutes: -1 },
+    { settingsDelayMinutes: 0.5 }, { settingsDelayMinutes: 601 }, { sites: ["https://youtube.com/"] },
+    { siteWaitEnabled: { "other.example": false } }, { dailyLimits: { "example.com": "30" } },
+    { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 2 } } },
+    { cooldownUntil: context.testClock.now + 1000 }, { contentControls: { instagram: { stories: "off" } } },
+    { contentControls: { youtube: { futureRule: true } } }, { dailyLockStart: "25:00" } ];
+  for (const patch of patches) {
+    const response = await requestPatch(context, patch);
+    assert.equal(response.ok, false, JSON.stringify(patch));
+    assert.equal(response.revision, 0);
+  }
+  assert.equal(state.localData.enabled, true);
+  assert.equal(state.localData.pendingConfigChange, undefined);
+});
+
+test("single-client leases cap actual time, reject replay, and avoid crediting hidden gaps", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  const { pending } = await requestPatch(context, { enabled: false });
+  assert.equal((await advanceMessage(context, pending, "popup-a", 1, 60000)).pending.remainingMs, 60000);
+  assert.equal((await advanceMessage(context, pending, "options-b", 1, 1000)).reason, "lease-held");
+  context.testClock.now += 1000;
+  const tick = await advanceMessage(context, pending, "popup-a", 2, 60000);
+  assert.equal(tick.pending.remainingMs, 59000);
+  assert.equal((await advanceMessage(context, pending, "popup-a", 2, 60000)).reason, "stale-sequence");
+  assert.equal((await advanceMessage(context, pending, "popup-a", 3, 60000)).pending.remainingMs, 59000);
+  context.testClock.now += 10000;
+  const expired = await advanceMessage(context, pending, "options-b", 2, 10000);
+  assert.equal(expired.pending.remainingMs, 59000);
+  context.testClock.now += 250;
+  assert.equal((await advanceMessage(context, pending, "options-b", 3, 250)).pending.remainingMs, 58750);
+  assert.equal(state.localData.enabled, true);
+});
+
+test("release preserves hold time and client sequences; non-owner views cannot release another lease", async () => {
+  const { context } = await loadBackground(baseConfig());
+  const { pending } = await requestPatch(context, { enabled: false });
+  await advanceMessage(context, pending, "popup-a", 1, 0);
+  await sendUi(context, { type: "RELEASE_PENDING_CONFIG_CHANGE", pendingId: pending.id, clientId: "options-b" });
+  assert.equal((await advanceMessage(context, pending, "options-b", 1, 0)).reason, "lease-held");
+  await sendUi(context, { type: "RELEASE_PENDING_CONFIG_CHANGE", pendingId: pending.id, clientId: "popup-a" });
+  context.testClock.now += 1000;
+  assert.equal((await advanceMessage(context, pending, "popup-a", 1, 1000)).reason, "stale-sequence");
+  assert.equal((await advanceMessage(context, pending, "popup-a", 2, 1000)).pending.remainingMs, 60000);
+});
+
+test("blurred or inactive settings views cannot advance a hold", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  const { pending } = await requestPatch(context, { enabled: false });
+  state.browser.windows.focused = false;
+  assert.equal((await advanceMessage(context, pending, "popup-a", 1, 0)).reason, "inactive-view");
+  state.browser.windows.focused = true;
+  state.tabs[0].active = false;
+  const sender = { ...context.testUiSender, url: state.browser.runtime.getURL("options/options.html"), tab: state.tabs[0] };
+  assert.equal((await advanceMessage(context, pending, "options-b", 1, 1000, sender)).reason, "inactive-view");
+  assert.equal(state.localData.pendingConfigChange.remainingMs, 60000);
+});
+
+test("cancel targets the current pending ID from either view and never cancels a newer request", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  const first = await requestPatch(context, { enabled: false });
+  const sender = { ...context.testUiSender, url: state.browser.runtime.getURL("options/options.html"), tab: state.tabs[0] };
+  const cancelled = await sendUi(context, { type: "CANCEL_PENDING_CONFIG_CHANGE", pendingId: first.pending.id }, sender);
+  assert.equal(cancelled.pending, null);
+  const next = await requestPatch(context, { enabled: false });
+  assert.notEqual(first.pending.id, next.pending.id);
+  const staleCancel = await sendUi(context, { type: "CANCEL_PENDING_CONFIG_CHANGE", pendingId: first.pending.id });
+  assert.equal(staleCancel.reason, "stale-pending");
+  assert.equal(state.localData.pendingConfigChange.id, next.pending.id);
+});
+
+test("future content schemas survive migration and unrelated changes while effective snapshots are disabled", async () => {
+  const future = { version: 99, youtube: { hideShorts: true }, futureRules: { layout: "new" } };
+  const { context, state } = await loadBackground(baseConfig({ contentControls: structuredClone(future) }));
+  const snapshot = await sendUi(context, { type: "GET_SETTINGS_STATE" });
+  assert.equal(snapshot.contentControlsSupported, false);
+  assert.equal(snapshot.storedContentControlsVersion, 99);
+  assert.equal(snapshot.config.contentControls.youtube.hideShorts, false);
+  assert.deepEqual(state.localData.contentControls, future);
+  assert.equal((await requestPatch(context, { delayMinutes: 2 })).applied, true);
+  assert.deepEqual(state.localData.contentControls, future);
+  assert.equal((await requestPatch(context, { contentControls: { youtube: { hideShorts: false } } })).reason, "unsupported-controls-version");
+  assert.deepEqual(state.localData.contentControls, future);
+});
+
+test("legacy pending changes retain exact remaining time and complete through the guarded lease", async () => {
+  const { context, state } = await loadBackground(baseConfig({ pendingConfigChange: {
+    type: "disableAirlock", remainingMs: 42000, waitMinutes: 1, createdAt: Date.now() - 18000, description: "Turning off Airlock"
+  } }));
+  const snapshot = await sendUi(context, { type: "GET_SETTINGS_STATE" });
+  assert.ok(snapshot.pending.id);
+  assert.equal(snapshot.pending.remainingMs, 42000);
+  assert.equal(snapshot.pending.description, "Turning off Airlock");
+  await advanceGuard(context, 41000);
+  assert.equal(state.localData.enabled, true);
+  await advanceGuard(context, 1000);
+  assert.equal(state.localData.enabled, false);
+  assert.equal(state.localData.configRevision, 1);
+});
+
+test("legacy wall-clock pending records become paused remaining time and never auto-complete in a hidden gap", async () => {
+  const { context, state } = await loadBackground(baseConfig({ pendingConfigChange: {
+    type: "disableAirlock", unlockAt: Date.now() + 60000, waitMinutes: 1
+  } }));
+  const before = state.localData.pendingConfigChange.remainingMs;
+  assert.ok(before > 58000 && before <= 60000);
+  assert.equal(state.localData.pendingConfigChange.unlockAt, undefined);
+  context.testClock.now += 120000;
+  const snapshot = await sendUi(context, { type: "GET_SETTINGS_STATE" });
+  assert.equal(snapshot.pending.remainingMs, before);
+  assert.equal(state.localData.enabled, true);
+});
+
+test("worker restart retains pending progress and invalidates its old view lease", async () => {
+  const first = await loadBackground(baseConfig());
+  const { pending } = await requestPatch(first.context, { enabled: false });
+  await advanceMessage(first.context, pending, "popup-a", 1, 0);
+  first.context.testClock.now += 1000;
+  await advanceMessage(first.context, pending, "popup-a", 2, 1000);
+  const restarted = await loadBackground(structuredClone(first.state.localData), structuredClone(first.state.sessionData));
+  restarted.context.testClock.now += 10000;
+  const resumed = await advanceMessage(restarted.context, pending, "popup-a", 3, 10000);
+  assert.equal(resumed.pending.remainingMs, 59000);
+  restarted.context.testClock.now += 1000;
+  assert.equal((await advanceMessage(restarted.context, pending, "popup-a", 4, 1000)).pending.remainingMs, 58000);
+});
+
+test("current-site snapshots disclose manual cooldown while master is off without changing sessions", async () => {
+  const { context, state } = await loadBackground(baseConfig({ enabled: false, cooldownUntil: Date.now() + 600000,
+    dailyUsage: { date: localDateKey(), sites: { "example.com": 90000 } } }));
+  const snapshot = await sendUi(context, { type: "GET_SETTINGS_STATE", tabId: 7 });
+  assert.equal(snapshot.currentSiteStatus.reason, "cooldown");
+  assert.equal(snapshot.currentSiteStatus.todayUsedMs, 90000);
+  assert.equal(snapshot.currentSiteStatus.tracked, true);
+  assert.deepEqual(state.sessionData, {});
+});
+
+test("manual cooldown start and expiration revise config through the serialized authority", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  const started = await sendUi(context, { type: "START_COOLDOWN" });
+  assert.equal(started.revision, 1);
+  assert.equal(started.cooldownUntil, context.testClock.now + 3600000);
+  context.testClock.now = started.cooldownUntil + 1;
+  await context.reconcileCooldownBoundary();
+  assert.equal(state.localData.cooldownUntil, null);
+  assert.equal(state.localData.configRevision, 2);
+});
+
+test("route notifications only target supported committed/history top-level pages and omit stale URLs", async () => {
+  const { state } = await loadBackground(baseConfig());
+  state.tabMessages.length = 0;
+  for (const event of [state.browser.webNavigation.onCommitted, state.browser.webNavigation.onHistoryStateUpdated]) {
+    const notify = event.listeners[0];
+    notify({ tabId: 7, frameId: 1, url: "https://www.youtube.com/shorts/a" });
+    notify({ tabId: 7, frameId: 0, url: "https://evilyoutube.com/shorts/a" });
+    notify({ tabId: 7, frameId: 0, url: "https://youtube.com.evil.test/" });
+    notify({ tabId: 7, frameId: 0, url: "https://example.com/" });
+    notify({ tabId: 7, frameId: 0, url: "https://www.youtube.com/shorts/abc" });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(state.tabMessages, [
+    { tabId: 7, message: { type: "AIRLOCK_ROUTE_CHANGED" } },
+    { tabId: 7, message: { type: "AIRLOCK_ROUTE_CHANGED" } }
+  ]);
+});
+
+test("timer completion acknowledges its durable session before a same-host redirect can recheck", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  await context.handleContentReady(7, "example.com");
+  const result = await sendUi(context, { type: "TIMER_DONE" }, { id: "airlock-test", url: "https://example.com/", tab: state.tabs[0], frameId: 0 });
+  assert.equal(result.ok, true);
+  assert.equal(state.sessionData.session_7.completed, true);
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "NO_OVERLAY");
+});
+
+test("recursive storage key reordering preserves holds and idempotent migration revisions", async () => {
+  const { context, state } = await loadBackground(baseConfig({ sites: ["z.example", "a.example"],
+    contentControls: { version: 1, instagram: { hideComments: true }, youtube: { hideShorts: true } },
+    dailyLimits: { "z.example": 20, "a.example": 15 }, dailyLimitPolicies: { "z.example": { mode: "cooldown", cooldownMinutes: 10 } } }), {}, { reorderKeys: true });
+  const started = await requestPatch(context, { contentControls: { youtube: { hideShorts: false } } });
+  assert.equal(started.applied, false);
+  const refreshed = await sendUi(context, { type: "GET_SETTINGS_STATE" });
+  assert.equal(refreshed.pending.id, started.pending.id);
+  assert.equal(refreshed.revision, started.revision);
+  await context.reconcileStartupState();
+  const afterMigration = await sendUi(context, { type: "GET_SETTINGS_STATE" });
+  assert.equal(afterMigration.pending.id, started.pending.id);
+  assert.equal(afterMigration.revision, started.revision);
+  await advanceGuard(context, 60000);
+  assert.equal(state.localData.contentControls.youtube.hideShorts, false);
+  assert.equal(state.localData.configRevision, started.revision + 1);
+  const completedRevision = state.localData.configRevision;
+  await context.reconcileStartupState();
+  assert.equal(state.localData.configRevision, completedRevision);
+});
+
+test("natural cooldown expiry atomically rebases unrelated holds without granting progress", async () => {
+  const { context, state } = await loadBackground(baseConfig({ cooldownUntil: Date.now() + 10000 }));
+  const started = await requestPatch(context, { enabled: false });
+  await advanceGuard(context, 1000);
+  const previous = structuredClone(state.localData.pendingConfigChange);
+  context.testClock.now = state.localData.cooldownUntil + 1;
+  state.localWrites.length = 0;
+  await context.reconcileCooldownBoundary();
+  const current = state.localData.pendingConfigChange;
+  assert.equal(state.localData.cooldownUntil, null);
+  assert.equal(state.localData.configRevision, started.revision + 1);
+  assert.equal(current.id, previous.id);
+  assert.deepEqual(current.patch, previous.patch);
+  assert.equal(current.remainingMs, previous.remainingMs);
+  assert.equal(current.baseRevision, started.revision + 1);
+  assert.equal(current.baseConfig.cooldownUntil, null);
+  const expiryWrite = state.localWrites.find((write) => write.cooldownUntil === null && write.configRevision === started.revision + 1);
+  assert.equal(expiryWrite.pendingConfigChange.id, previous.id);
+  const resumed = await advanceMessage(context, current, "test-popup", ++context.testSequence, 10000);
+  assert.equal(resumed.pending.remainingMs, previous.remainingMs);
+});
+
+test("natural cooldown expiry never revives a stale revision or changed value fingerprint", async () => {
+  for (const staleKind of ["revision", "fingerprint"]) {
+    const { context, state } = await loadBackground(baseConfig({ cooldownUntil: Date.now() + 10000 }));
+    await requestPatch(context, { enabled: false });
+    if (staleKind === "revision") state.localData.configRevision += 1;
+    else state.localData.delayMinutes = 2;
+    context.testClock.now = state.localData.cooldownUntil + 1;
+    await context.reconcileCooldownBoundary();
+    assert.equal(state.localData.pendingConfigChange, undefined, staleKind);
+    assert.equal(state.localData.enabled, true, staleKind);
+    assert.equal(state.localData.cooldownUntil, null, staleKind);
+  }
+});
+
+test("natural expiry clears satisfied end-only holds and retains mixed pending changes", async () => {
+  const onlyEnd = await loadBackground(baseConfig({ cooldownUntil: Date.now() + 10000 }));
+  await requestPatch(onlyEnd.context, { cooldownUntil: null });
+  onlyEnd.context.testClock.now = onlyEnd.state.localData.cooldownUntil + 1;
+  await onlyEnd.context.reconcileCooldownBoundary();
+  assert.equal(onlyEnd.state.localData.pendingConfigChange, undefined);
+  assert.equal(onlyEnd.state.localData.configRevision, 1);
+  const mixed = await loadBackground(baseConfig({ cooldownUntil: Date.now() + 10000 }));
+  const started = await requestPatch(mixed.context, { cooldownUntil: null, enabled: false });
+  mixed.context.testClock.now = mixed.state.localData.cooldownUntil + 1;
+  await mixed.context.reconcileCooldownBoundary();
+  assert.equal(mixed.state.localData.pendingConfigChange.id, started.pending.id);
+  assert.equal(mixed.state.localData.pendingConfigChange.remainingMs, 60000);
+  assert.equal(mixed.state.localData.enabled, true);
+});
+
+test("worker startup after cooldown expiry preserves unrelated holds and old-format pending time", async () => {
+  const original = await loadBackground(baseConfig({ cooldownUntil: Date.now() + 10000 }));
+  const { pending } = await requestPatch(original.context, { enabled: false });
+  await advanceGuard(original.context, 1000);
+  const restarted = await loadBackground(structuredClone(original.state.localData), structuredClone(original.state.sessionData),
+    { now: original.state.localData.cooldownUntil + 1, reorderKeys: true });
+  assert.equal(restarted.state.localData.pendingConfigChange.id, pending.id);
+  assert.equal(restarted.state.localData.pendingConfigChange.remainingMs, 59000);
+  assert.equal(restarted.state.localData.pendingConfigChange.baseRevision, 1);
+  assert.equal(restarted.state.localData.cooldownUntil, null);
+  const legacy = await loadBackground(baseConfig({ cooldownUntil: Date.now() - 10000,
+    pendingConfigChange: { type: "disableAirlock", remainingMs: 42000, waitMinutes: 1 } }));
+  assert.equal(legacy.state.localData.pendingConfigChange.remainingMs, 42000);
+  assert.equal(legacy.state.localData.enabled, true);
 });

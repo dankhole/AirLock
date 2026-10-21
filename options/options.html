@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="../shared/settings-ui.css">
+  <link rel="stylesheet" href="options.css">
+  <title>Airlock Settings</title>
+</head>
+<body>
+  <div class="settings-shell">
+    <header class="settings-header"><h1>Airlock <span>Settings</span></h1><p class="help">Intentional access. Less distracting content.</p></header>
+    <nav class="settings-nav" aria-label="Settings"><a href="#general" aria-current="page">General</a><a href="#sites">Sites &amp; usage</a><a href="#youtube">YouTube</a><a href="#instagram">Instagram</a><a href="#facebook">Facebook</a></nav>
+    <main id="settings-main">
+      <p id="ui-status" class="status-message" role="status" aria-live="polite">Loading settings…</p>
+      <section id="pending-config-section" class="pending-change" aria-labelledby="pending-config-title" hidden>
+        <h2 id="pending-config-title">Settings change awaiting hold</h2><ul id="pending-config-differences"></ul>
+        <div id="pending-config-timer" class="pending-countdown" aria-label="Remaining hold time">0:00</div>
+        <p id="pending-config-engagement" class="help" role="status">Paused · engage the target to count down</p>
+        <p class="help">Hover here or hold Space/Enter to count down. On touch, press and hold. Current restrictions stay in effect. Progress pauses when this view is hidden or unfocused.</p>
+        <div class="action-row"><button type="button" id="pending-config-hover-target" class="hold-target">Hold to apply change</button><button type="button" id="pending-config-cancel">Cancel change</button></div>
+      </section>
+      <section id="general" class="settings-panel" aria-labelledby="general-title">
+        <h2 id="general-title" tabindex="-1">General</h2>
+        <label class="check-label"><input type="checkbox" id="enabled-toggle" data-setting aria-describedby="master-help"><strong>Restrictions</strong></label><p id="master-help" class="help"></p>
+        <section class="section stack" aria-labelledby="waits-title">
+          <h3 id="waits-title">Intentional friction</h3>
+          <div class="field"><label for="delay-input">Site wait</label><div class="field-inline"><input type="number" id="delay-input" min="1" max="600" step="1" required data-setting aria-describedby="delay-help"><span>minutes</span></div><p id="delay-help" class="help">Countdown before entering a tracked site with its site wait enabled. Range: 1–600 minutes.</p></div>
+          <div class="field"><label for="settings-delay-input">Settings hold</label><div class="field-inline"><input type="number" id="settings-delay-input" min="0" max="600" step="1" required data-setting aria-describedby="settings-delay-help"><span>minutes</span></div><p id="settings-delay-help" class="help">Engagement required before weaker settings apply. Set to 0 for changes to apply immediately after confirmation. Reducing this value uses the current hold. Range: 0–600 minutes.</p></div>
+          <label class="check-label"><input type="checkbox" id="moving-target-toggle" data-setting aria-describedby="moving-target-help"><span><strong>Moving site-wait target</strong><span id="moving-target-help" class="help">Move the hover target during site-entry waits. Keyboard engagement and reduced motion keep it stationary; required time stays the same.</span></span></label>
+        </section>
+        <section class="section" aria-labelledby="daily-lock-title">
+          <h3 id="daily-lock-title">Daily lock</h3><label class="check-label"><input type="checkbox" id="daily-lock-toggle" data-setting><span>Block tracked sites during this schedule</span></label>
+          <div class="schedule-fields"><div class="field"><label for="daily-lock-start">From</label><input type="time" id="daily-lock-start" required data-setting aria-describedby="daily-lock-help"></div><div class="field"><label for="daily-lock-end">Until</label><input type="time" id="daily-lock-end" required data-setting aria-describedby="daily-lock-help"></div></div>
+          <p id="daily-lock-help" class="help">Your local time. A schedule may cross midnight; start and end must differ.</p><p id="daily-lock-status" class="status-message"></p>
+        </section>
+        <section class="section" aria-labelledby="cooldown-title"><h3 id="cooldown-title">Manual cooldown</h3><p id="cooldown-status" class="help"></p><button type="button" id="cooldown-btn" data-setting>Start 1-hour cooldown</button></section>
+        <section class="section" aria-labelledby="presets-title"><h3 id="presets-title">Content presets</h3><p class="help">Add the displayed rules while keeping unrelated preferences and tracking intact. Review exact changes before applying.</p><div class="action-row"><button type="button" id="short-form-preset" data-setting data-content-setting>Hide short-form content…</button><button type="button" id="inbox-preset" data-setting data-content-setting>Instagram inbox focus…</button></div></section>
+      </section>
+      <section id="sites" class="settings-panel" aria-labelledby="sites-title" hidden>
+        <h2 id="sites-title" tabindex="-1">Sites &amp; usage</h2><p class="panel-intro help">Focused usage is recorded for tracked domains and their subdomains, even with Restrictions off. Today totals reset at local midnight. Content rules are configured independently.</p>
+        <div id="site-list" class="site-list" tabindex="-1"></div>
+        <section class="section" aria-labelledby="add-site-title"><h3 id="add-site-title">Track a site</h3><form id="add-site-form" class="stack"><div class="field"><label for="site-input">Domain or website address</label><input type="text" id="site-input" placeholder="example.com" autocomplete="off" required data-setting aria-describedby="site-input-help"><p id="site-input-help" class="help">For example, youtube.com. Subdomains are included.</p></div><label class="check-label"><input type="checkbox" id="add-site-wait" checked data-setting><span>Require site wait for this new site</span></label><div class="action-row"><button type="submit" id="add-site-btn" class="primary" data-setting>Track site…</button></div></form></section>
+      </section>
+      <section id="youtube" class="settings-panel platform-panel" aria-labelledby="youtube-title" hidden><h2 id="youtube-title" tabindex="-1">YouTube</h2><div class="platform-content"></div></section>
+      <section id="instagram" class="settings-panel platform-panel" aria-labelledby="instagram-title" hidden><h2 id="instagram-title" tabindex="-1">Instagram</h2><div class="platform-content"></div></section>
+      <section id="facebook" class="settings-panel platform-panel" aria-labelledby="facebook-title" hidden><h2 id="facebook-title" tabindex="-1">Facebook</h2><div class="platform-content"></div></section>
+    </main>
+  </div>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-message"><form method="dialog"><h2 id="confirm-dialog-title">Confirm settings change</h2><p id="confirm-dialog-message">Review these changes. Any weakening requires the configured Settings hold before it takes effect.</p><ul id="confirm-dialog-differences"></ul><div class="action-row"><button type="submit" id="confirm-dialog-cancel" value="cancel">Cancel</button><button type="submit" id="confirm-dialog-submit" class="primary" value="confirm">Confirm change</button></div></form></dialog>
+  <script src="../shared/daily-lock.js"></script><script src="../shared/content-controls.js"></script><script src="../shared/settings-client.js"></script><script src="../shared/settings-ui.js"></script><script src="options.js"></script>
+</body>
+</html>

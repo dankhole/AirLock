@@ -39,8 +39,16 @@ function createElement(onRemove = () => {}, rect = null) {
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(listener);
     },
+    removeEventListener(type, listener) {
+      const next = (listeners.get(type) || []).filter((value) => value !== listener);
+      listeners.set(type, next);
+    },
+    dispatch(type, event = {}) {
+      const value = { type, preventDefault() {}, ...event };
+      (listeners.get(type) || []).forEach((listener) => listener(value));
+    },
     click() {
-      (listeners.get("click") || []).forEach((listener) => listener({ type: "click" }));
+      if (!this.disabled) this.dispatch("click");
     },
     remove: onRemove,
     getBoundingClientRect() {
@@ -50,6 +58,7 @@ function createElement(onRemove = () => {}, rect = null) {
 }
 
 function createDocument() {
+  const documentEvents = new Map();
   const overlayHosts = [];
   const reminderHosts = [];
 
@@ -59,7 +68,14 @@ function createDocument() {
     hasFocus() {
       return true;
     },
-    addEventListener() {},
+    addEventListener(type, listener) {
+      if (!documentEvents.has(type)) documentEvents.set(type, new Set());
+      documentEvents.get(type).add(listener);
+    },
+    removeEventListener(type, listener) { documentEvents.get(type)?.delete(listener); },
+    dispatch(type, value = {}) {
+      for (const listener of documentEvents.get(type) || []) listener({ type, ...value });
+    },
     querySelectorAll(selector) {
       if (selector === "airlock-overlay") return [...overlayHosts];
       if (selector === "airlock-usage-reminder") return [...reminderHosts];
@@ -120,27 +136,38 @@ function createContext(document, options = {}) {
   let animationFrameId = 0;
   let now = options.now || Date.now();
   const animationFrames = new Map();
+  const timeouts = new Map();
+  const windowEvents = new Map();
   const intervals = new Map();
   const sentMessages = [];
-  const event = { addListener() {} };
+  function createEvent() {
+    const listeners = new Set();
+    return { addListener(fn) { listeners.add(fn); }, removeListener(fn) { listeners.delete(fn); },
+      emit(...args) { return [...listeners].map((fn) => fn(...args)); },
+      get size() { return listeners.size; } };
+  }
+  const storageEvent = createEvent();
+  const runtimeEvent = createEvent();
   const browser = {
     storage: {
       local: {
         async get() {
+          if (options.storageGet) return options.storageGet();
           return {
             enabled: options.enabled !== false,
-            sites: ["example.com"],
+            sites: options.sites || ["example.com"],
             movingTargetEnabled: options.movingTargetEnabled === true
           };
         }
       },
-      onChanged: event
+      onChanged: storageEvent
     },
     runtime: {
-      onMessage: event,
+      onMessage: runtimeEvent,
       async sendMessage(message) {
         sentMessages.push(message);
         if (message.type === "CONTENT_READY") {
+          if (options.contentReady) return options.contentReady(message);
           return options.contentReadyResponse || {
             type: "SHOW_OVERLAY",
             remainingMs: 60_000,
@@ -148,6 +175,7 @@ function createContext(document, options = {}) {
             dailyLimitMinutes: null
           };
         }
+        if (message.type === "TIMER_DONE") return options.timerDoneResponse || { ok: true };
         if (message.type === "GET_ACTIVE_STATE") return { active: true };
         if (message.type === "DAILY_USAGE_UPDATE") {
           return options.dailyUsageResponse;
@@ -174,7 +202,11 @@ function createContext(document, options = {}) {
       matchMedia() {
         return { matches: options.reducedMotion === true, addEventListener() {} };
       },
-      addEventListener() {}
+      addEventListener(type, listener) {
+        if (!windowEvents.has(type)) windowEvents.set(type, new Set());
+        windowEvents.get(type).add(listener);
+      },
+      removeEventListener(type, listener) { windowEvents.get(type)?.delete(listener); }
     },
     requestAnimationFrame(callback) {
       animationFrameId += 1;
@@ -184,11 +216,12 @@ function createContext(document, options = {}) {
     cancelAnimationFrame(id) {
       animationFrames.delete(id);
     },
-    setTimeout() {
+    setTimeout(callback, delay) {
       timerId += 1;
+      timeouts.set(timerId, { callback, delay });
       return timerId;
     },
-    clearTimeout() {},
+    clearTimeout(id) { timeouts.delete(id); },
     setInterval(callback) {
       timerId += 1;
       intervals.set(timerId, callback);
@@ -204,6 +237,21 @@ function createContext(document, options = {}) {
     }
   });
 
+  if (options.pageState) {
+    vm.runInContext(fs.readFileSync(path.resolve(__dirname, "..", "shared", "page-state.js"), "utf8"), context);
+  }
+  context.storageListenerCount = () => storageEvent.size;
+  context.timeoutCount = () => timeouts.size;
+  context.emitRuntime = (value) => runtimeEvent.emit(value);
+  context.emitStorage = (changes) => storageEvent.emit(changes, "local");
+  context.emitWindow = (type, value = {}) => {
+    for (const listener of windowEvents.get(type) || []) listener({ type, ...value });
+  };
+  context.runTimeouts = (delay) => {
+    for (const [id, timer] of [...timeouts]) {
+      if (delay === undefined || timer.delay === delay) { timeouts.delete(id); timer.callback(); }
+    }
+  };
   context.runAnimationFrames = (timestamp) => {
     const callbacks = [...animationFrames.values()];
     animationFrames.clear();
@@ -350,4 +398,232 @@ test("a usage reminder can be dismissed without interrupting the page", async ()
 
   assert.equal(document.reminderHosts.length, 0);
   assert.equal(document.overlayHosts.length, 0);
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((yes) => { resolve = yes; });
+  return { promise, resolve };
+}
+async function settle() { await new Promise((resolve) => setImmediate(resolve)); }
+
+test("unfinished waits and hard locks have no accessible Continue, including gate mode changes", async () => {
+  const document = createDocument();
+  const context = createContext(document);
+  await vm.runInContext(contentSource, context);
+  const elements = document.latestElements;
+  assert.equal(elements["continue-btn"].disabled, true);
+  assert.equal(elements["continue-btn"].tabIndex, -1);
+  elements["continue-btn"].click();
+  assert.equal(context.sentMessages.some((message) => message.type === "TIMER_DONE"), false);
+  assert.equal(elements["hover-target"].disabled, false);
+  context.emitRuntime({ type: "SHOW_COOLDOWN", unlockAt: Date.now() + 60_000 });
+  assert.equal(elements["hover-target"].disabled, true);
+  assert.equal(elements["hover-target"].tabIndex, -1);
+  context.emitRuntime({ type: "RESET_TIMER", remainingMs: 1000, active: true });
+  assert.equal(elements["hover-target"].disabled, false);
+  assert.equal(elements["hover-target"].tabIndex, 0);
+  assert.equal(elements["continue-btn"].disabled, true);
+});
+
+test("keyboard and touch holds use the same wait duration, release pauses, and keyboard holds are stationary", async () => {
+  for (const mode of ["keyboard", "touch"]) {
+    const document = createDocument();
+    const context = createContext(document, { movingTargetEnabled: true,
+      contentReadyResponse: { type: "SHOW_OVERLAY", remainingMs: 1000, active: true } });
+    await vm.runInContext(contentSource, context);
+    const target = document.latestElements["hover-target"];
+    context.advanceTime(500);
+    context.runTimeouts(250);
+    assert.equal(document.latestElements["timer-display"].textContent, "0:01");
+    const press = () => target.dispatch(mode === "keyboard" ? "keydown" : "pointerdown",
+      mode === "keyboard" ? { key: " " } : { pointerType: "touch", pointerId: 1 });
+    const release = () => target.dispatch(mode === "keyboard" ? "keyup" : "pointerup",
+      mode === "keyboard" ? { key: " " } : { pointerType: "touch", pointerId: 1 });
+    press();
+    if (mode === "keyboard") {
+      target.dispatch("keydown", { key: " ", repeat: true });
+      context.runAnimationFrames(0);
+      assert.equal(target.classList.contains("moving"), false);
+      assert.equal(target.style.transform, "");
+    }
+    context.advanceTime(500);
+    context.runTimeouts(250);
+    release();
+    context.advanceTime(2000);
+    context.runTimeouts(250);
+    assert.equal(document.latestElements["continue-btn"].disabled, true);
+    press();
+    context.advanceTime(500);
+    context.runTimeouts(250);
+    assert.equal(document.latestElements["continue-btn"].disabled, false, mode);
+    assert.equal(document.latestElements["continue-btn"].tabIndex, 0);
+    assert.ok(context.sentMessages.some((message) => message.type === "TIMER_UPDATE" && message.remainingMs === 0));
+  }
+});
+
+test("route transitions pause the existing usage clock and resume without backfilling time", async () => {
+  const document = createDocument();
+  const context = createContext(document, { pageState: true, enabled: false,
+    contentReadyResponse: { type: "NO_OVERLAY", active: true } });
+  await vm.runInContext(contentSource, context);
+  assert.equal(context.AirlockPageState.get().coreMode, "none");
+  context.advanceTime(1000);
+  context.runIntervals();
+  await settle();
+  context.AirlockPageState.setNavigationPending(true);
+  context.advanceTime(9000);
+  context.runIntervals();
+  await settle();
+  context.AirlockPageState.setNavigationPending(false);
+  context.advanceTime(1000);
+  context.runIntervals();
+  await settle();
+  const ticks = context.sentMessages.filter((message) => message.type === "DAILY_USAGE_UPDATE");
+  assert.equal(ticks.length, 2);
+  assert.deepEqual(ticks.map((message) => message.elapsedMs), [1000, 1000]);
+});
+
+test("an untracked page publishes core readiness without starting a usage clock", async () => {
+  const document = createDocument();
+  const context = createContext(document, { pageState: true, sites: [] });
+  await vm.runInContext(contentSource, context);
+  assert.equal(context.AirlockPageState.get().ready, true);
+  assert.equal(context.AirlockPageState.get().coreMode, "none");
+  context.advanceTime(1000);
+  context.runIntervals();
+  assert.equal(context.sentMessages.length, 0);
+});
+
+test("completed waits open navigation only after the background acknowledges their session", async () => {
+  const done = deferred();
+  const document = createDocument();
+  const context = createContext(document, { pageState: true, timerDoneResponse: done.promise,
+    contentReadyResponse: { type: "SHOW_OVERLAY", remainingMs: 0, active: true } });
+  await vm.runInContext(contentSource, context);
+  document.latestElements["continue-btn"].click();
+  assert.equal(context.AirlockPageState.get().coreMode, "timer");
+  done.resolve({ ok: true });
+  await settle();
+  assert.equal(context.AirlockPageState.get().coreMode, "none");
+});
+
+test("settings rechecks close the route gate and skip obsolete allow responses", async () => {
+  const first = deferred();
+  const second = deferred();
+  let calls = 0;
+  const document = createDocument();
+  const context = createContext(document, { pageState: true,
+    contentReady: () => {
+      calls += 1;
+      return calls === 1 ? { type: "NO_OVERLAY", active: true } : calls === 2 ? first.promise : second.promise;
+    } });
+  await vm.runInContext(contentSource, context);
+  const transitions = [];
+  context.AirlockPageState.subscribe((value) => transitions.push(value.coreMode));
+  context.emitStorage({ enabled: { newValue: true } });
+  assert.equal(context.AirlockPageState.get().ready, false);
+  context.emitRuntime({ type: "RECHECK_CONFIG" });
+  first.resolve({ type: "NO_OVERLAY", active: true });
+  await settle();
+  assert.equal(calls, 3);
+  assert.equal(transitions.includes("none"), false);
+  second.resolve({ type: "SHOW_OVERLAY", remainingMs: 1000, active: true });
+  await settle();
+  assert.equal(context.AirlockPageState.get().coreMode, "timer");
+  assert.equal(context.AirlockPageState.get().ready, true);
+});
+
+test("late usage responses cannot recreate UI after controller disposal", async () => {
+  for (const response of [
+    { ok: true, reached: true, resetAt: Date.now() + 60_000, limitMinutes: 10 },
+    { ok: true, reached: false, usageReminder: { site: "example.com", milestoneMinutes: 20 } }
+  ]) {
+    const usage = deferred();
+    const document = createDocument();
+    const context = createContext(document, { dailyUsageResponse: usage.promise,
+      contentReadyResponse: { type: "NO_OVERLAY", active: true } });
+    await vm.runInContext(contentSource, context);
+    context.advanceTime(1000);
+    context.runIntervals();
+    context.AirlockCoreController.dispose();
+    usage.resolve(response);
+    await settle();
+    assert.equal(document.overlayHosts.length, 0);
+    assert.equal(document.reminderHosts.length, 0);
+  }
+});
+
+test("startup settings changes cannot publish a stale allowed core gate", async () => {
+  const first = deferred();
+  const second = deferred();
+  let calls = 0;
+  const document = createDocument();
+  const context = createContext(document, { pageState: true,
+    contentReady: () => (++calls === 1 ? first.promise : second.promise) });
+  const initializing = vm.runInContext(contentSource, context);
+  await settle();
+  context.emitStorage({ configRevision: { newValue: 1 }, enabled: { newValue: true } });
+  first.resolve({ type: "NO_OVERLAY", active: true });
+  await settle();
+  assert.equal(calls, 2);
+  assert.equal(context.AirlockPageState.get().ready, false);
+  second.resolve({ type: "SHOW_DAILY_LOCK", unlockAt: Date.now() + 60_000 });
+  await initializing;
+  assert.equal(context.AirlockPageState.get().coreMode, "dailyLock");
+  assert.equal(context.AirlockPageState.get().ready, true);
+});
+
+test("initial storage failure retries safely and early disposal releases the bootstrap listener", async () => {
+  let reads = 0;
+  const document = createDocument();
+  const context = createContext(document, { pageState: true, storageGet: async () => {
+    if (++reads === 1) throw new Error("temporarily unavailable");
+    return { enabled: true, sites: [], movingTargetEnabled: false };
+  } });
+  context.console = { warn() {} };
+  const initializing = vm.runInContext(contentSource, context);
+  await settle();
+  assert.equal(context.AirlockPageState.get().ready, false);
+  context.runTimeouts(5000);
+  await initializing;
+  assert.equal(context.AirlockPageState.get().ready, true);
+  context.AirlockCoreController.dispose();
+  assert.equal(context.storageListenerCount(), 0);
+
+  const waiting = deferred();
+  const next = createContext(createDocument(), { pageState: true, storageGet: () => waiting.promise });
+  const boot = vm.runInContext(contentSource, next);
+  assert.equal(next.storageListenerCount(), 1);
+  next.AirlockCoreController.dispose();
+  assert.equal(next.storageListenerCount(), 0);
+  waiting.resolve({ enabled: true, sites: [] });
+  await boot;
+  assert.equal(next.AirlockPageState.get().ready, false);
+});
+
+test("page status query reports the actual core gate without changing it", async () => {
+  const context = createContext(createDocument(), { pageState: true });
+  await vm.runInContext(contentSource, context);
+  const [response] = context.emitRuntime({ type: "AIRLOCK_GET_PAGE_STATE" });
+  const status = await response;
+  assert.equal(status.ok, true);
+  assert.equal(status.ready, true);
+  assert.equal(status.coreMode, "timer");
+  assert.equal(status.navigationPending, false);
+  assert.equal(status.runtimeStatus, null);
+  assert.equal(context.AirlockPageState.get().coreMode, "timer");
+});
+
+test("a rejected startup read after disposal cannot schedule a retry", async () => {
+  let reject;
+  const pendingRead = new Promise((resolve, no) => { reject = no; });
+  const context = createContext(createDocument(), { pageState: true, storageGet: () => pendingRead });
+  const initializing = vm.runInContext(contentSource, context);
+  context.AirlockCoreController.dispose();
+  reject(new Error("extension context closed"));
+  await initializing;
+  assert.equal(context.storageListenerCount(), 0);
+  assert.equal(context.timeoutCount(), 0);
+  assert.equal(context.AirlockPageState.get().ready, false);
 });

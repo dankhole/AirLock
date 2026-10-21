@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { collectPackageFiles, copyPackageFiles } = require("./package-files.js");
 
 const rootDir = path.resolve(__dirname, "..");
 const versionFiles = ["package.json", "package-lock.json", "manifest.json", "firefox/manifest.json"];
@@ -52,17 +53,13 @@ function prepareFirefox(root, tag, notes = "") {
   if (manifest.browser_specific_settings?.gecko?.id !== "airlock@dankhole") {
     throw new Error("Firefox manifest must target the existing airlock@dankhole add-on");
   }
+  const files = collectPackageFiles(root, manifest);
   const staging = path.join(root, "store", "firefox-source");
   fs.rmSync(staging, { recursive: true, force: true });
   fs.mkdirSync(staging, { recursive: true });
   // Preserve authored files byte-for-byte, including the Firefox manifest.
   fs.copyFileSync(path.join(root, "firefox/manifest.json"), path.join(staging, "manifest.json"));
-  for (const directory of ["background", "content", "popup", "shared", "icons"]) {
-    fs.cpSync(path.join(root, directory), path.join(staging, directory), {
-      recursive: true,
-      filter: (source) => !path.basename(source).startsWith("."),
-    });
-  }
+  copyPackageFiles(root, staging, files);
   writeJson(root, "store/amo-metadata.json", {
     version: notes.trim() ? { release_notes: { "en-US": notes } } : {},
   });
