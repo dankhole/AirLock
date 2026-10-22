@@ -10,8 +10,12 @@
 <body>
   <main class="popup">
     <header class="popup-header"><h1>Airlock</h1><a id="settings-link" href="../options/options.html#general" target="_blank">All settings ↗</a></header>
-    <label class="check-label restrictions-control"><span><strong>Restrictions</strong><span class="help">Waits, limits &amp; content rules</span></span><input type="checkbox" id="enabled-toggle" data-setting aria-describedby="master-help"></label>
-    <p id="master-help" class="visually-hidden"></p>
+    <div class="master-controls">
+      <label class="check-label restrictions-control"><span><strong>Site restrictions</strong><span class="help">Waits, limits &amp; schedules</span></span><input type="checkbox" id="enabled-toggle" data-setting aria-describedby="master-help"></label>
+      <p id="master-help" class="visually-hidden"></p>
+      <label class="check-label restrictions-control"><span><strong>Content blocking</strong><span class="help">Shorts, Reels &amp; saved content rules</span></span><input type="checkbox" id="content-controls-toggle" data-setting aria-describedby="content-controls-help"></label>
+      <p id="content-controls-help" class="visually-hidden"></p>
+    </div>
     <p id="ui-status" class="status-message" role="status" aria-live="polite">Loading settings…</p>
     <section id="pending-config-section" class="pending-change" aria-labelledby="pending-config-title" hidden>
       <div class="pending-heading"><h2 id="pending-config-title">Settings change awaiting hold</h2><div id="pending-config-timer" class="pending-countdown" aria-label="Remaining hold time">0:00</div></div>

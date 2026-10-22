@@ -2,7 +2,7 @@
 
 **Airlock** does not collect or transmit personal data.
 
-Your tracked site list, settings, content-control preferences and per-site daily usage totals are stored locally on your device using the browser's extension storage APIs. Daily usage records focused time only on sites you add to Airlock, resets at local midnight, and continues whether or not a daily limit or the main Restrictions switch is enabled. Timer session data is stored in session storage and is cleared when the browser closes.
+Your tracked site list, settings, content-control preferences and per-site daily usage totals are stored locally on your device using the browser's extension storage APIs. Daily usage records focused time only on sites you add to Airlock, resets at local midnight, and continues whether or not a daily limit or the Site restrictions switch is enabled. Timer session data is stored in session storage and is cleared when the browser closes.
 
 Content controls inspect the current page's URL and elements locally to identify selected features such as Reels, Shorts or Stories. Navigation notifications are used to refresh these controls; Airlock does not save a browsing-history log, page contents, message text or a record of hidden posts. It does not add monitoring for a site merely because its content controls are enabled.
 

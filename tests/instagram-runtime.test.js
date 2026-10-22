@@ -25,7 +25,7 @@ test('Instagram runtime pauses current/lazy media, suppresses play, reverses con
   pageState.setCore({ready:true,coreMode:'none'});
   const onChanged = event();
   const onMessage = event();
-  let config = {enabled:true,contentControls:controlsApi.getDefaults(),configRevision:1};
+  let config = {contentControlsEnabled:true,contentControls:controlsApi.getDefaults(),configRevision:1};
   Object.assign(config.contentControls.instagram,{blockReels:true,hideImages:true,hideVideos:true,hideComments:true,unreadBadges:'subdued'});
   const browser = {storage:{local:{get:async()=>config},onChanged},runtime:{onMessage}};
   const timers = new Map();
@@ -120,12 +120,12 @@ test('Instagram runtime pauses current/lazy media, suppresses play, reverses con
     change({hideVideos:true,hideImages:true});
     await flush();
     assert(attachmentVideo.hasAttribute('data-airlock-hidden'));
-    config={...config,enabled:false,configRevision:config.configRevision+1};
-    onChanged.emit({enabled:{newValue:false}},'local');
+    config={...config,contentControlsEnabled:false,configRevision:config.configRevision+1};
+    onChanged.emit({contentControlsEnabled:{newValue:false}},'local');
     await flush();
     assert.equal(document.querySelector('[data-airlock-hidden],[data-airlock-subdued],[data-airlock-controls-style]'),null);
-    config={...config,enabled:true,configRevision:config.configRevision+1};
-    onChanged.emit({enabled:{newValue:true}},'local');
+    config={...config,contentControlsEnabled:true,configRevision:config.configRevision+1};
+    onChanged.emit({contentControlsEnabled:{newValue:true}},'local');
     await flush();
     assert(attachmentVideo.hasAttribute('data-airlock-hidden'));
     runtime.dispose();

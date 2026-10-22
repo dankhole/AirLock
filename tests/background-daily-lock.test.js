@@ -1421,3 +1421,68 @@ test("explicit wait-setting changes still reset access while tracking is paused"
   await requestPatch(context, { siteWaitEnabled: { "example.com": true }, siteTrackingEnabled: { "example.com": true } });
   assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_OVERLAY");
 });
+
+test("content master migrates from the old switch once and remains independent on restart", async () => {
+  for (const enabled of [true, false]) {
+    const { context, state } = await loadBackground(baseConfig({ enabled, contentControls: { version: 1, youtube: { hideShorts: true } } }));
+    assert.equal(state.localData.contentControlsEnabled, enabled);
+    const revision = state.localData.configRevision;
+    await context.reconcileStartupState();
+    assert.equal(state.localData.configRevision, revision, "repeat migration is idempotent");
+    const result = await requestPatch(context, { contentControlsEnabled: !enabled });
+    if (enabled) await advanceGuard(context, 60000);
+    else assert.equal(result.applied, true);
+    assert.equal(state.localData.enabled, enabled, "content master never changes site restrictions");
+    assert.equal(state.localData.contentControlsEnabled, !enabled);
+    await context.reconcileStartupState();
+    assert.equal(state.localData.contentControlsEnabled, !enabled, "explicit independent state survives startup");
+    assert.equal(state.localData.contentControls.youtube.hideShorts, true, "saved rules survive both switches");
+  }
+});
+
+test("each master has its own guarded off action without changing the other", async () => {
+  const { context, state } = await loadBackground(baseConfig({ contentControlsEnabled: true }));
+  const siteOff = await requestPatch(context, { enabled: false });
+  assert.equal(siteOff.applied, false);
+  assert.deepEqual(siteOff.pending.patch, { enabled: false });
+  await advanceGuard(context, 60000);
+  assert.equal(state.localData.enabled, false);
+  assert.equal(state.localData.contentControlsEnabled, true);
+  const contentOff = await requestPatch(context, { contentControlsEnabled: false });
+  assert.equal(contentOff.applied, false, "content off waits even with site restrictions off");
+  assert.equal(state.localData.contentControlsEnabled, true);
+  await advanceGuard(context, 60000);
+  assert.equal(state.localData.contentControlsEnabled, false);
+  assert.equal(state.localData.enabled, false);
+  assert.equal((await requestPatch(context, { contentControlsEnabled: true })).applied, true);
+  assert.equal(state.localData.enabled, false);
+  assert.equal((await requestPatch(context, { contentControlsEnabled: "false" })).reason, "invalid-contentControlsEnabled");
+});
+
+test("content master never disables site gates or an active manual cooldown", async () => {
+  const { context, state } = await loadBackground(baseConfig({ contentControlsEnabled: false }));
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_OVERLAY", "site wait remains active");
+  const cooldown = await sendUi(context, { type: "START_COOLDOWN" });
+  assert.equal(cooldown.ok, true);
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_COOLDOWN");
+  assert.equal(state.localData.contentControlsEnabled, false);
+});
+
+test("pre-split pending master off keeps its remaining hold and combined intent", async () => {
+  const old = await loadBackground(baseConfig({ contentControlsEnabled: true }));
+  await requestPatch(old.context, { enabled: false });
+  await advanceGuard(old.context, 12000);
+  const stored = structuredClone(old.state.localData);
+  delete stored.contentControlsEnabled;
+  delete stored.pendingConfigChange.baseConfig.contentControlsEnabled;
+  const previous = structuredClone(stored.pendingConfigChange);
+  const { context, state } = await loadBackground(stored);
+  const snapshot = await sendUi(context, { type: "GET_SETTINGS_STATE" });
+  assert.equal(snapshot.revision, previous.baseRevision);
+  assert.equal(snapshot.pending.id, previous.id);
+  assert.equal(snapshot.pending.remainingMs, previous.remainingMs);
+  assert.deepEqual(snapshot.pending.patch, { enabled: false, contentControlsEnabled: false });
+  await advanceGuard(context, previous.remainingMs);
+  assert.equal(state.localData.enabled, false);
+  assert.equal(state.localData.contentControlsEnabled, false);
+});

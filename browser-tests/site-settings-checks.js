@@ -60,6 +60,7 @@ async function runSiteSettingsChecks(browser,options,sitePage,artifacts,t) {
       input.dispatchEvent(new Event("input",{bubbles:true}));
       input.dispatchEvent(new Event("change",{bubbles:true}));
     },{id,value});
+    await browser.click(options,"#save-settings");
     return confirm(description,predicate);
   }
   async function pause(paused) {
@@ -69,6 +70,7 @@ async function runSiteSettingsChecks(browser,options,sitePage,artifacts,t) {
     await browser.click(options,'[id="site-tracking-'+suffix+'"]');
     const unchanged=await read();
     assert.equal((unchanged.config.siteTrackingEnabled||{})[site]===false,!paused,"tracking changes only after confirmation");
+    await browser.click(options,"#save-settings");
     return confirm(paused?"pause tracking":"resume tracking",state=>((state.config.siteTrackingEnabled||{})[site]===false)===paused);
   }
   const used=state=>state.usage.sites[site]||0;

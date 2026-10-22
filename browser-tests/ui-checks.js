@@ -17,10 +17,17 @@ async function runUiChecks(browser,options,popup,artifacts,t) {
   await navigatePanel("general");
   await poll(()=>browser.evaluate(options,()=>!document.getElementById("enabled-toggle").disabled),Boolean,"settings unlocked after hold");
   assert.equal(await browser.evaluate(options,()=>document.getElementById("settings-delay-input").value),"0","zero-minute setting rendered");
+  const savedDelay=await browser.evaluate(options,()=>Number(document.getElementById("delay-input").value));
+  await browser.evaluate(options,value=>{
+    const input=document.getElementById("delay-input");input.value=String(value+1);
+    input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new Event("change",{bubbles:true}));
+  },savedDelay);
+  assert.equal(await browser.evaluate(options,async()=>(await browser.runtime.sendMessage({type:"GET_SETTINGS_STATE"})).config.delayMinutes),savedDelay,"draft leaves saved wait unchanged");
   await browser.evaluate(options,()=>document.getElementById("enabled-toggle").focus());
   await browser.pressKey(options,"Space");
   await poll(()=>browser.evaluate(options,()=>({open:document.getElementById("confirm-dialog").open,active:document.activeElement.id,focused:document.hasFocus(),checked:document.getElementById("enabled-toggle").checked,status:document.getElementById("ui-status").textContent})),state=>state.open,"keyboard confirmation opens");
   assert.equal(await browser.evaluate(options,()=>document.activeElement.id),"confirm-dialog-cancel","dialog starts on safe cancel action");
+  assert.doesNotMatch(await browser.evaluate(options,()=>document.getElementById("confirm-dialog-differences").textContent),/Site wait minutes/,"Restrictions confirms independently of unsaved edits");
   for(let i=0;i<4;i++){
     await browser.pressKey(options,"Tab");
     const focus=await browser.evaluate(options,()=>({inside:document.getElementById("confirm-dialog").contains(document.activeElement),tag:document.activeElement.tagName,id:document.activeElement.id}));
@@ -32,6 +39,10 @@ async function runUiChecks(browser,options,popup,artifacts,t) {
   await poll(()=>browser.evaluate(options,()=>window.__airlockDialogClosed),Boolean,"native close event completed");
   await poll(()=>browser.evaluate(options,()=>document.activeElement.id),value=>value==="enabled-toggle","Escape restores invoker focus");
   assert.equal(await browser.evaluate(options,async()=>(await browser.runtime.sendMessage({type:"GET_SETTINGS_STATE"})).config.enabled),true,"cancel preserves settings");
+  assert.equal(await browser.evaluate(options,()=>Number(document.getElementById("delay-input").value)),savedDelay+1,"independent confirmation preserves unsaved draft");
+  await browser.click(options,"#discard-settings");
+  assert.equal(await browser.evaluate(options,()=>Number(document.getElementById("delay-input").value)),savedDelay,"Discard restores the active setting");
+  await browser.evaluate(options,()=>document.getElementById("enabled-toggle").focus());
   await browser.focus(options);
   await browser.pressKey(options,"Space");
   await poll(()=>browser.evaluate(options,()=>({open:document.getElementById("confirm-dialog").open,active:document.activeElement.id,focused:document.hasFocus(),checked:document.getElementById("enabled-toggle").checked,status:document.getElementById("ui-status").textContent})),state=>state.open,"reopened confirmation");

@@ -12,11 +12,13 @@ const origin = "http://airlock.test";
 function snapshot(name) {
   const tracked = !name.includes("untracked");
   const domain = name.includes("long") ? "a-very-long-subdomain.for-a-carefully-configured.example.com" : "youtube.com";
-  const config = { enabled: true, sites: tracked ? [domain] : [], siteWaitEnabled: {}, siteTrackingEnabled: {},
+  const config = { enabled: true, contentControlsEnabled: true, sites: tracked ? [domain] : [], siteWaitEnabled: {}, siteTrackingEnabled: {},
     settingsDelayMinutes: 1, delayMinutes: 2, dailyLimits: { [domain]: 45 }, dailyLimitPolicies: {},
     cooldownUntil: name === "cooldown" ? Date.now() + 3600000 : null, contentControls: controls.getDefaults() };
   if (name === "paused") config.siteTrackingEnabled[domain] = false;
-  if (name === "rules-on" || /runtime|settings-loading|gated/.test(name)) config.contentControls.youtube.hideShorts = true;
+  if (name === "site-off-rules-on") config.enabled = false;
+  if (name === "content-off") config.contentControlsEnabled = false;
+  if (["rules-on", "site-off-rules-on", "content-off"].includes(name) || /runtime|settings-loading|gated/.test(name)) config.contentControls.youtube.hideShorts = true;
   const result = { ok: true, revision: 1, config, pending: null, contentControlsSupported: true,
     usage: { sites: { [domain]: 720000 } }, domain,
     currentSiteStatus: { domain, site: tracked ? domain : null, reason: name === "paused" ? "paused" : tracked ? "allowed" : "untracked", dailyLimitMode: "cooldown", dailyLimitMinutes: tracked ? 45 : null, allowanceUsedMs: 720000 } };
@@ -33,7 +35,7 @@ async function main() {
   const results = [];
   try {
     for (const width of [300, 360, 400]) {
-      for (const name of ["tracked", "untracked", "pending-tracked", "pending-untracked", "paused", "cooldown", "long", "unavailable", "untracked-unavailable", "pending-long", "rules-on", "runtime-missing", "runtime-failed", "settings-loading", "gated", "pending-runtime-missing", "pending-runtime-failed"]) {
+      for (const name of ["tracked", "untracked", "pending-tracked", "pending-untracked", "paused", "cooldown", "long", "unavailable", "untracked-unavailable", "pending-long", "rules-on", "site-off-rules-on", "content-off", "runtime-missing", "runtime-failed", "settings-loading", "gated", "pending-runtime-missing", "pending-runtime-failed"]) {
         const page = await browser.newPage({ viewport: { width, height: 600 } });
         await page.route(`${origin}/**`, async route => {
           const relative = new URL(route.request().url()).pathname.replace(/^\//, "");
@@ -93,6 +95,8 @@ async function main() {
         if (name.includes("runtime-failed")) assert.equal(await page.locator("#current-rules-status").textContent(), "Content rules: error · reload this site");
         if (name === "settings-loading") assert.match(await page.locator("#current-rules-status").textContent(), /loading settings/);
         if (name === "gated") assert.equal(await page.locator("#current-rules-status").textContent(), "Content rules: 1 enabled");
+        if (name === "content-off") assert.equal(await page.locator("#current-rules-status").textContent(), "Content rules: paused by Content blocking");
+        if (name === "site-off-rules-on") assert.equal(await page.locator("#current-rules-status").textContent(), "Content rules: 1 enabled");
         if (name === "rules-on") assert.equal(await page.locator("#current-rules-status").textContent(), "Content rules: 1 enabled");
         await page.screenshot({ path: path.join(artifacts, `${name}-${width}.png`) });
         if (!name.includes("pending")) {

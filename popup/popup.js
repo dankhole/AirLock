@@ -4,6 +4,7 @@
   const client = AirlockSettingsClient.create(browser);
   const controller = ui.createController(client, { catalog: AirlockControls.catalog });
   const enabled = document.getElementById("enabled-toggle");
+  const contentEnabled = document.getElementById("content-controls-toggle");
   const coreModes = { wait: "timer", cooldown: "cooldown", "daily-lock": "dailyLock", "daily-limit": "dailyLimit", allowed: "none", disabled: "none", untracked: "none", paused: "none" };
   const probeRetryDelays = [150, 400, 1000];
   let currentDomain = null;
@@ -18,11 +19,12 @@
   let probeInFlight = false;
   let disposed = false;
   document.getElementById("master-help").textContent = ui.MASTER_HELP;
-  enabled.addEventListener("change", () => {
-    const next = enabled.checked;
+  document.getElementById("content-controls-help").textContent = ui.CONTENT_HELP;
+  for (const [input, key, label] of [[enabled, "enabled", "Site restrictions"], [contentEnabled, "contentControlsEnabled", "Content blocking"]]) input.addEventListener("change", () => {
+    const next = input.checked;
     if (!client.snapshot) return;
-    enabled.checked = client.snapshot.config.enabled !== false;
-    controller.change({ enabled: next }, next ? "Turn on Restrictions?" : "Turn off Restrictions?");
+    input.checked = client.snapshot.config[key] !== false;
+    controller.change({ [key]: next }, "Turn " + (next ? "on " : "off ") + label + "?");
   });
   document.getElementById("add-current-btn").addEventListener("click", async () => {
     if (!currentDomain || !client.snapshot) return;
@@ -42,11 +44,12 @@
   function render(snapshot) {
     const config = snapshot.config;
     enabled.checked = config.enabled !== false;
+    contentEnabled.checked = config.contentControlsEnabled !== false;
     controller.renderCooldown(config);
     const cooldownActive = Number(config.cooldownUntil) > Date.now();
     document.getElementById("cooldown-btn").textContent = cooldownActive ? "End early…" : "Start 1 hour";
     document.getElementById("cooldown-status").textContent = cooldownActive
-      ? "All tracked sites blocked until " + ui.formatClock(config.cooldownUntil) + ", even with Restrictions off."
+      ? "All tracked sites blocked until " + ui.formatClock(config.cooldownUntil) + ", even with Site restrictions off."
       : "Blocks all tracked sites for 1 hour.";
     const siteState = snapshot.currentSiteStatus;
     const matched = siteState && siteState.site || (currentDomain && config.sites.find((site) => currentDomain === site || currentDomain.endsWith("." + site)));
@@ -72,9 +75,9 @@
     let rulesStatus = snapshot.contentControlsSupported === false ? "Content rules: update required"
       : !platform ? "Content rules: unsupported site"
       : !configuredRules ? "Content rules: Off · none enabled"
-      : config.enabled === false ? "Content rules: paused by Restrictions"
+      : config.contentControlsEnabled === false ? "Content rules: paused by Content blocking"
       : "Content rules: " + configuredRules + " enabled";
-    if (platform && configuredRules && config.enabled !== false && snapshot.contentControlsSupported !== false) {
+    if (platform && configuredRules && config.contentControlsEnabled !== false && snapshot.contentControlsSupported !== false) {
       const runtime = pageState && pageState.runtimeStatus;
       if (hostAccess === false) rulesStatus = "Content rules: allow site access";
       else if (pageState && Object.prototype.hasOwnProperty.call(pageState, "runtimeStatus")) {

@@ -61,7 +61,7 @@
     }
 
     function getControls() {
-      return settings && settings.enabled !== false ? settings.contentControls[platform] : null;
+      return settings && settings.contentControlsEnabled !== false ? settings.contentControls[platform] : null;
     }
 
     function isActive() {
@@ -356,9 +356,9 @@
       cancelSettingsRetry();
       const sequence = ++readSequence;
       try {
-        const saved = await browser.storage.local.get(["enabled", "contentControls", "configRevision"]);
+        const saved = await browser.storage.local.get(["enabled", "contentControlsEnabled", "contentControls", "configRevision"]);
         if (disposed || sequence !== readSequence) return;
-        settings = { enabled: saved.enabled !== false, contentControls: controlsApi.normalize(saved.contentControls) };
+        settings = { contentControlsEnabled: typeof saved.contentControlsEnabled === "boolean" ? saved.contentControlsEnabled : saved.enabled !== false, contentControls: controlsApi.normalize(saved.contentControls) };
         revision = Number.isSafeInteger(saved.configRevision) && saved.configRevision >= 0 ? saved.configRevision : 0;
         generation += 1;
         cancelScheduled();
@@ -426,7 +426,7 @@
 
     if (supported) {
       const onStorage = (changes, area) => {
-        if (area !== "local" || !["enabled", "contentControls", "configRevision"].some((key) => key in changes)) return;
+        if (area !== "local" || !["enabled", "contentControlsEnabled", "contentControls", "configRevision"].some((key) => key in changes)) return;
         refreshSettings();
       };
       const onMessage = (message) => {

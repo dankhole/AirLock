@@ -28,7 +28,7 @@ function fixture(options = {}) {
   state.setCore({ ready: true, coreMode: "none" });
   const onChanged = event();
   const onMessage = event();
-  let config = { enabled: true, contentControls: controlsApi.getDefaults(), configRevision: 0 };
+  let config = { contentControlsEnabled: true, contentControls: controlsApi.getDefaults(), configRevision: 0 };
   config.contentControls.youtube.hideShorts = true;
   const browser = { storage: { local: { get: options.get || (async () => config) }, onChanged }, runtime: { onMessage } };
   const timers = new Map();
@@ -124,10 +124,10 @@ test("no guesses before authoritative settings, and stale reads cannot re-enable
   await f.flush();
   assert.equal(f.window.document.querySelector("[data-airlock-hidden]"), null);
   assert.equal(f.observed, 0);
-  f.onChanged.emit({ enabled: { newValue: false } }, "local");
-  second.resolve({ enabled: false, contentControls: f.config.contentControls, configRevision: 2 });
+  f.onChanged.emit({ contentControlsEnabled: { newValue: false } }, "local");
+  second.resolve({ contentControlsEnabled: false, contentControls: f.config.contentControls, configRevision: 2 });
   await f.flush();
-  first.resolve({ enabled: true, contentControls: f.config.contentControls, configRevision: 1 });
+  first.resolve({ contentControlsEnabled: true, contentControls: f.config.contentControls, configRevision: 1 });
   await f.flush();
   assert.equal(f.runtime.getStatus().revision, 2);
   assert.equal(f.runtime.getStatus().active, false);
@@ -136,7 +136,7 @@ test("no guesses before authoritative settings, and stale reads cannot re-enable
 });
 
 test("temporary startup settings failure retries authoritatively and hidden or disposed pages stop retries", async () => {
-  const saved = {enabled: true, contentControls: controlsApi.getDefaults(), configRevision: 3};
+  const saved = {contentControlsEnabled: true, contentControls: controlsApi.getDefaults(), configRevision: 3};
   saved.contentControls.youtube.hideShorts = true;
   let reads = 0;
   const f = fixture({get: async () => {
@@ -168,7 +168,7 @@ test("temporary startup settings failure retries authoritatively and hidden or d
 });
 
 test("the reported Instagram Reel URL redirects without relying on a DOM match once the core allows it", async () => {
-  const saved = {enabled: true, contentControls: controlsApi.getDefaults(), configRevision: 4};
+  const saved = {contentControlsEnabled: true, contentControls: controlsApi.getDefaults(), configRevision: 4};
   saved.contentControls.instagram.blockReels = true;
   const f = fixture({url: 'https://www.instagram.com/reels/DcPL-RdxD7v/',
     html: '<!doctype html><main><p>No Reel-specific DOM markers</p></main>',
@@ -199,7 +199,7 @@ test("live disable restores independent marks, and re-enable filters without cha
   assert.equal(element.hasAttribute("data-airlock-hidden"), false);
   assert.equal(element.hasAttribute("data-airlock-subdued"), true);
   assert.equal(element.style.color, "blue");
-  f.change({ enabled: false, configRevision: 2 });
+  f.change({ contentControlsEnabled: false, configRevision: 2 });
   await f.flush();
   assert.equal(element.hasAttribute("data-airlock-subdued"), false);
   assert.equal(f.window.document.querySelector("[data-airlock-controls-style]"), null);
@@ -209,7 +209,7 @@ test("live disable restores independent marks, and re-enable filters without cha
   assert.equal(f.observed, observedAtDisable);
   next.youtube.hideShorts = true;
   element.setAttribute("data-feature", "first");
-  f.change({ enabled: true, contentControls: next, configRevision: 3 });
+  f.change({ contentControlsEnabled: true, contentControls: next, configRevision: 3 });
   await f.flush();
   assert.equal(element.hasAttribute("data-airlock-hidden"), true);
   f.dispose();
@@ -253,7 +253,7 @@ test("media hiding pauses initial and renewed playback, and never restarts on cl
   const baseline = pauses;
   video.dispatchEvent(new f.window.Event("play"));
   assert.equal(pauses, baseline + 1);
-  f.change({ enabled: false });
+  f.change({ contentControlsEnabled: false });
   await f.flush();
   video.dispatchEvent(new f.window.Event("play"));
   assert.equal(pauses, baseline + 1);
@@ -300,7 +300,7 @@ test("stale URL and disabled changes cancel queued redirects", async () => {
   f.onMessage.emit({ type: "AIRLOCK_ROUTE_CHANGED" });
   await f.flush();
   f.state.setCore({ ready: true, coreMode: "none" });
-  f.change({ enabled: false });
+  f.change({ contentControlsEnabled: false });
   await f.flush();
   assert.equal(f.visits.length, 0);
   assert.equal(f.state.get().navigationPending, false);
@@ -401,7 +401,7 @@ test("browser runtime reinjection shares one live singleton and replaces a dispo
   const { window } = dom;
   const storageEvent = event();
   const runtimeEvent = event();
-  window.browser = { storage: { local: { get: async () => ({ enabled: false }) }, onChanged: storageEvent },
+  window.browser = { storage: { local: { get: async () => ({ contentControlsEnabled: false }) }, onChanged: storageEvent },
     runtime: { onMessage: runtimeEvent } };
   window.AirlockControls = controlsApi;
   window.AirlockPageState = createPageState();
@@ -436,13 +436,13 @@ test("back/forward page restoration and popstate reevaluate current URL and sett
   assert.equal(f.state.get().navigationPending, false);
   assert.equal(f.runtime.getStatus().active, false);
   const observed = f.observed;
-  f.config.enabled = false;
+  f.config.contentControlsEnabled = false;
   f.window.dispatchEvent(new f.window.PageTransitionEvent("pageshow", { persisted: true }));
   await f.flush();
   assert.equal(f.runtime.getStatus().active, false);
   assert.equal(f.visits.length, 1);
   // The restoration uses authoritative saved preferences even without a storage event.
-  f.config.enabled = true;
+  f.config.contentControlsEnabled = true;
   f.dom.reconfigure({ url: "https://www.youtube.com/watch?v=abc" });
   f.window.dispatchEvent(new f.window.PageTransitionEvent("pageshow", { persisted: true }));
   await f.flush();
@@ -453,7 +453,7 @@ test("back/forward page restoration and popstate reevaluate current URL and sett
 });
 
 function restorationFixture() {
-  const saved = { enabled: true, contentControls: controlsApi.getDefaults(), configRevision: 0 };
+  const saved = { contentControlsEnabled: true, contentControls: controlsApi.getDefaults(), configRevision: 0 };
   saved.contentControls.youtube.hideShorts = true;
   saved.contentControls.youtube.shortsRoute = "watch";
   let pendingRead = null;
@@ -471,7 +471,7 @@ test("page restoration waits for fresh settings and never restores cached effect
   const card = f.window.document.getElementById("short-card");
   assert.equal(card.hasAttribute("data-airlock-hidden"), true);
   f.window.dispatchEvent(new f.window.PageTransitionEvent("pagehide", { persisted: true }));
-  saved.enabled = false;
+  saved.contentControlsEnabled = false;
   saved.configRevision = 1;
   const failedRead = deferRead();
   f.dom.reconfigure({ url: "https://www.youtube.com/shorts/abcdefghijk" });
@@ -499,7 +499,7 @@ test("page restoration waits for fresh settings and never restores cached effect
   assert.equal(card.hasAttribute("data-airlock-hidden"), false);
   assert.equal(f.visits.length, 0);
 
-  saved.enabled = true;
+  saved.contentControlsEnabled = true;
   saved.configRevision = 2;
   const enabledRead = deferRead();
   f.window.dispatchEvent(new f.window.PageTransitionEvent("pageshow", { persisted: true }));
@@ -525,7 +525,7 @@ test("restoration ignores older settings reads and reads that finish after pageh
   f.window.dispatchEvent(new f.window.PageTransitionEvent("pageshow", { persisted: true }));
   const newerRead = deferRead();
   f.window.dispatchEvent(new f.window.PageTransitionEvent("pageshow", { persisted: true }));
-  saved.enabled = false;
+  saved.contentControlsEnabled = false;
   saved.configRevision = 2;
   newerRead.resolve(structuredClone(saved));
   await f.flush();
@@ -557,4 +557,37 @@ test("restoration ignores older settings reads and reads that finish after pageh
   assert.equal(f.onMessage.size, 0);
   assert.equal(f.timers.size, 0);
   f.dispose();
+});
+
+test("site restrictions and content blocking masters are independent and reversible", async () => {
+  const f = fixture();
+  try {
+    await f.flush();
+    const card = f.window.document.querySelector("[data-feature]");
+    assert(card.hasAttribute("data-airlock-hidden"));
+    f.change({ enabled: false }); await f.flush();
+    assert(card.hasAttribute("data-airlock-hidden"), "site restrictions off preserves filtering");
+    f.change({ contentControlsEnabled: false }); await f.flush();
+    assert.equal(card.hasAttribute("data-airlock-hidden"), false);
+    assert.equal(f.runtime.getStatus().active, false);
+    f.change({ enabled: true }); await f.flush();
+    assert.equal(card.hasAttribute("data-airlock-hidden"), false, "site restrictions on cannot enable content blocking");
+    f.change({ enabled: false, contentControlsEnabled: true }); await f.flush();
+    assert(card.hasAttribute("data-airlock-hidden"), "saved content rules resume with site restrictions off");
+  } finally { f.dispose(); }
+});
+
+test("runtime uses the legacy master only until an explicit content switch is stored", async () => {
+  const config = { enabled: false, contentControls: controlsApi.getDefaults(), configRevision: 1 };
+  config.contentControls.youtube.hideShorts = true;
+  const f = fixture({ get: async () => structuredClone(config) });
+  try {
+    await f.flush();
+    assert.equal(f.runtime.getStatus().active, false);
+    config.enabled = true; f.onChanged.emit({ enabled: { newValue: true } }, "local"); await f.flush();
+    assert.equal(f.runtime.getStatus().active, true);
+    config.enabled = false; config.contentControlsEnabled = true;
+    f.onChanged.emit({ enabled: { newValue: false }, contentControlsEnabled: { newValue: true } }, "local"); await f.flush();
+    assert.equal(f.runtime.getStatus().active, true, "explicit content state takes precedence over legacy switch");
+  } finally { f.dispose(); }
 });

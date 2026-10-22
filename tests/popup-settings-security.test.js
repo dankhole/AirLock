@@ -29,7 +29,7 @@ async function loadSurface(t, surface = "options", overrides = {}, options = {})
   dialog.close = function (value) { this.returnValue = value; this.open = false; this.dispatchEvent(new window.Event("close")); };
   let snapshot = {
     ok: true, revision: 1, pending: null, contentControlsSupported: true,
-    config: { enabled: true, sites: ["example.com"], delayMinutes: 2, settingsDelayMinutes: 2, movingTargetEnabled: false,
+    config: { enabled: true, contentControlsEnabled: true, sites: ["example.com"], delayMinutes: 2, settingsDelayMinutes: 2, movingTargetEnabled: false,
       siteWaitEnabled: {}, siteTrackingEnabled: {}, dailyLimits: {}, dailyLimitPolicies: {}, cooldownUntil: null,
       dailyLockEnabled: false, dailyLockStart: "22:00", dailyLockEnd: "07:00", contentControls: controls.getDefaults(), ...overrides },
     usage: { date: "2026-09-30", sites: { "example.com": 90_000 } }, dailyLimitCooldowns: {},
@@ -74,7 +74,7 @@ async function loadSurface(t, surface = "options", overrides = {}, options = {})
     },
     permissions: { async contains() { return options.hostAccess !== false; }, async request() { return false; } },
     tabs: {
-      async query() { return [{ id: 7, url: "https://current.example/path" }]; },
+      async query() { return [{ id: 7, url: options.currentUrl || "https://current.example/path" }]; },
       async sendMessage(tabId, message) {
         pageMessages.push({ tabId, message: clone(message) });
         return options.pageResponse ? options.pageResponse(pageMessages.length - 1) : options.pageUnavailable ? null : { ok: true, ready: true, coreMode: "none" };
@@ -105,36 +105,133 @@ async function loadSurface(t, surface = "options", overrides = {}, options = {})
       if (input.type === "checkbox") input.checked = value; else if (value !== undefined) input.value = value;
       input.dispatchEvent(new window.Event(type, { bubbles: true, cancelable: true })); await settle(); return input;
     },
+    async save() { const button = document.getElementById("save-settings"); button.focus(); button.click(); await settle(); },
     async confirm(value = "confirm") { assert.equal(dialog.open, true); dialog.close(value); await settle(); },
     get requests() { return messages.filter((message) => message.type === "REQUEST_CONFIG_CHANGE"); }
   };
 }
 
-test("general settings and quick actions confirm before authoritative commands, without storage writes", async (t) => {
+test("options stages general settings and saves one reviewed revision-checked batch", async (t) => {
   const env = await loadSurface(t);
-  const cases = [["enabled-toggle", false, { enabled: false }], ["delay-input", "5", { delayMinutes: 5 }], ["settings-delay-input", "4", { settingsDelayMinutes: 4 }], ["moving-target-toggle", true, { movingTargetEnabled: true }], ["daily-lock-toggle", true, { dailyLockEnabled: true }], ["daily-lock-start", "21:00", { dailyLockStart: "21:00", dailyLockEnd: "07:00" }]];
-  for (const [id, value, patch] of cases) {
-    const count = env.requests.length;
+  for (const [id, value] of [["delay-input", "5"], ["settings-delay-input", "4"], ["moving-target-toggle", true], ["daily-lock-toggle", true], ["daily-lock-start", "21:00"]]) {
     await env.dispatch(id, value);
-    assert.equal(env.requests.length, count, "No settings command before confirmation for " + id);
-    await env.confirm();
-    assert.deepEqual(env.requests.at(-1).patch, patch);
-    assert.equal(env.requests.at(-1).expectedRevision, env.snapshot.revision - 1);
+    assert.equal(env.requests.length, 0);
+    assert.equal(env.document.getElementById("confirm-dialog").open, false);
   }
+  assert.equal(env.snapshot.config.delayMinutes, 2);
+  assert.match(env.document.getElementById("settings-draft-status").textContent, /Unsaved/);
+  await env.save();
+  assert.match(env.document.getElementById("confirm-dialog-differences").textContent, /Site wait minutes: 2 → 5/);
+  assert.equal(env.requests.length, 0);
+  await env.confirm();
+  assert.equal(env.requests.length, 1);
+  assert.deepEqual(env.requests[0].patch, { delayMinutes: 5, settingsDelayMinutes: 4, movingTargetEnabled: true, dailyLockEnabled: true, dailyLockStart: "21:00" });
+  assert.equal(env.requests[0].expectedRevision, 1);
+  assert.equal(env.document.getElementById("save-settings").disabled, true);
+  assert.equal(env.document.activeElement.id, "settings-draft-title");
+  assert.equal(env.storageSets.length, 0);
+});
+
+test("Site restrictions and manual cooldown stay independent confirmed actions and preserve drafts", async (t) => {
+  const env = await loadSurface(t);
+  await env.dispatch("delay-input", "5");
+  await env.dispatch("enabled-toggle", false);
+  assert.equal(env.document.getElementById("enabled-toggle").checked, true);
+  await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { enabled: false });
+  assert.equal(env.document.getElementById("delay-input").value, "5");
+  assert.equal(env.snapshot.config.delayMinutes, 2);
+  assert.equal(env.document.getElementById("save-settings").disabled, true);
+  assert.equal(env.document.getElementById("rebase-settings").hidden, false);
   await env.dispatch("cooldown-btn", undefined, "click");
   assert.equal(env.messages.some((item) => item.type === "START_COOLDOWN"), false);
   await env.confirm();
   assert.equal(env.messages.some((item) => item.type === "START_COOLDOWN"), true);
   await env.dispatch("cooldown-btn", undefined, "click"); await env.confirm();
   assert.deepEqual(env.requests.at(-1).patch, { cooldownUntil: null });
+  assert.equal(env.document.getElementById("delay-input").value, "5");
   assert.equal(env.storageSets.length, 0);
 });
 
-test("pending weakening keeps effective values, locks edits, and can cancel with the current pending ID", async (t) => {
+test("both views confirm Content blocking independently and keep saved rules intact", async (t) => {
+  const prefs = controls.getDefaults(); prefs.youtube.hideShorts = true;
+  for (const surface of ["options", "popup"]) {
+    const env = await loadSurface(t, surface, { enabled: false, contentControls: prefs });
+    const input = env.document.getElementById("content-controls-toggle");
+    assert.equal(input.checked, true);
+    assert.match(env.document.getElementById("master-help").textContent, /Content blocking stays independent/);
+    assert.match(env.document.getElementById("content-controls-help").textContent, /Shorts, Reels/);
+    await env.dispatch(input.id, false);
+    assert.equal(input.checked, true, "the active state stays visible until confirmed");
+    assert.equal(env.requests.length, 0);
+    assert.match(env.document.getElementById("confirm-dialog-differences").textContent, /Content blocking: On → Off/);
+    await env.confirm("cancel");
+    assert.equal(input.checked, true); assert.equal(env.requests.length, 0);
+    await env.dispatch(input.id, false); await env.confirm();
+    assert.deepEqual(env.requests.at(-1).patch, { contentControlsEnabled: false });
+    assert.equal(env.snapshot.config.enabled, false);
+    assert.deepEqual(env.snapshot.config.contentControls, prefs);
+    assert.equal(input.checked, false);
+    await env.dispatch(input.id, true); await env.confirm();
+    assert.deepEqual(env.requests.at(-1).patch, { contentControlsEnabled: true });
+    assert.deepEqual(env.snapshot.config.contentControls, prefs);
+    assert.equal(env.storageSets.length, 0);
+  }
+});
+
+test("Content blocking changes preserve options drafts and stay outside the saved batch", async (t) => {
+  const env = await loadSurface(t);
+  await env.dispatch("delay-input", "5");
+  await env.dispatch("rule-youtube.hideShorts", true);
+  // A native checkbox emits input before change. Neither event may create a
+  // draft change for the independent master action.
+  await env.dispatch("content-controls-toggle", false, "input");
+  await env.dispatch("content-controls-toggle", false); await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { contentControlsEnabled: false });
+  assert.equal(env.document.getElementById("delay-input").value, "5");
+  assert.equal(env.document.getElementById("rule-youtube.hideShorts").checked, true);
+  assert.match(env.document.getElementById("youtube-status").textContent, /Draft: Paused by Content blocking/);
+  assert.equal(env.document.getElementById("save-settings").disabled, true);
+  await env.dispatch("rebase-settings", undefined, "click"); await env.confirm();
+  await env.save(); await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { delayMinutes: 5, contentControls: { youtube: { hideShorts: true } } });
+  assert.equal(env.snapshot.config.contentControlsEnabled, false);
+  assert.equal(env.document.getElementById("content-controls-toggle").checked, false);
+});
+
+test("a pending Content blocking toggle locks both independent masters and can be cancelled", async (t) => {
+  for (const surface of ["options", "popup"]) {
+    const env = await loadSurface(t, surface, {}, { pendingRequests: true });
+    await env.dispatch("content-controls-toggle", false); await env.confirm();
+    assert.deepEqual(env.requests.at(-1).patch, { contentControlsEnabled: false });
+    assert.equal(env.snapshot.config.contentControlsEnabled, true);
+    assert.equal(env.document.getElementById("content-controls-toggle").checked, true);
+    assert.equal(env.document.getElementById("content-controls-toggle").disabled, true);
+    assert.equal(env.document.getElementById("enabled-toggle").disabled, true);
+    assert.equal(env.document.activeElement.id, "pending-config-hover-target");
+    await env.dispatch("pending-config-cancel", undefined, "click");
+    assert.equal(env.document.getElementById("content-controls-toggle").disabled, false);
+    assert.equal(env.document.activeElement.id, "content-controls-toggle");
+  }
+});
+
+test("content summaries follow Content blocking independently of Site restrictions", async (t) => {
+  const prefs = controls.getDefaults(); prefs.youtube.hideShorts = true;
+  for (const enabled of [true, false]) for (const contentControlsEnabled of [true, false]) {
+    const config = { enabled, contentControlsEnabled, contentControls: prefs };
+    const summary = ui.rulesSummary(config, "youtube", controls.catalog);
+    assert.match(summary, contentControlsEnabled ? /^Configured/ : /^Paused by Content blocking/);
+    const env = await loadSurface(t, "popup", config, { currentUrl: "https://www.youtube.com/watch?v=test" });
+    assert.equal(env.document.getElementById("enabled-toggle").checked, enabled);
+    assert.equal(env.document.getElementById("content-controls-toggle").checked, contentControlsEnabled);
+    assert.equal(env.document.getElementById("current-rules-status").textContent, contentControlsEnabled ? "Content rules: 1 enabled" : "Content rules: paused by Content blocking");
+    assert.equal(env.document.getElementById("current-rules").textContent, summary);
+  }
+});
+
+test("pending quick action keeps active values, locks edits, and cancels by current pending ID", async (t) => {
   const env = await loadSurface(t, "options", {}, { pendingRequests: true });
-  await env.dispatch("enabled-toggle", false);
-  assert.equal(env.document.getElementById("enabled-toggle").checked, true);
-  await env.confirm();
+  await env.dispatch("enabled-toggle", false); await env.confirm();
   assert.equal(env.document.getElementById("pending-config-section").hidden, false);
   assert.equal(env.document.activeElement.id, "pending-config-hover-target");
   assert.equal(env.document.getElementById("enabled-toggle").checked, true);
@@ -143,18 +240,20 @@ test("pending weakening keeps effective values, locks edits, and can cancel with
   await env.dispatch("pending-config-cancel", undefined, "click");
   assert.equal(env.messages.at(-1).pendingId, "pending-one");
   assert.equal(env.document.getElementById("pending-config-section").hidden, true);
-  assert.equal(env.document.getElementById("enabled-toggle").disabled, false);
   assert.equal(env.snapshot.config.enabled, true);
   assert.equal(env.document.activeElement.id, "enabled-toggle");
 });
 
-test("cancelled confirmation preserves configuration and returns focus", async (t) => {
+test("cancelled Save preserves draft and returns focus, while Discard restores active values", async (t) => {
   const env = await loadSurface(t);
-  await env.dispatch("delay-input", "5");
-  await env.confirm("cancel");
+  await env.dispatch("delay-input", "5"); await env.save(); await env.confirm("cancel");
   assert.equal(env.requests.length, 0);
+  assert.equal(env.document.getElementById("delay-input").value, "5");
+  assert.equal(env.document.activeElement.id, "save-settings");
+  await env.dispatch("discard-settings", undefined, "click");
   assert.equal(env.document.getElementById("delay-input").value, "2");
-  assert.equal(env.document.activeElement.id, "delay-input");
+  assert.equal(env.document.getElementById("save-settings").disabled, true);
+  assert.equal(env.document.activeElement.id, "settings-draft-title");
 });
 
 test("a new confirmation waits for the previous native close event after Escape", async (t) => {
@@ -162,91 +261,76 @@ test("a new confirmation waits for the previous native close event after Escape"
   const dialog = env.document.getElementById("confirm-dialog");
   await env.dispatch("enabled-toggle", false);
   assert.equal(dialog.open, true);
-
-  // Native Escape clears open and restores focus before dispatching close.
-  dialog.open = false;
-  dialog.returnValue = "";
+  dialog.open = false; dialog.returnValue = "";
   await env.dispatch("enabled-toggle", false);
-  assert.equal(dialog.open, false, "a queued close must not consume a newly opened confirmation");
-  dialog.dispatchEvent(new env.window.Event("close"));
-  await settle();
+  assert.equal(dialog.open, false);
+  dialog.dispatchEvent(new env.window.Event("close")); await settle();
   assert.equal(env.requests.length, 0);
-
-  await env.dispatch("enabled-toggle", false);
-  assert.equal(dialog.open, true);
-  await env.confirm();
-  assert.equal(env.requests.length, 1);
-  assert.equal(env.snapshot.config.enabled, false);
+  await env.dispatch("enabled-toggle", false); await env.confirm();
+  assert.equal(env.requests.length, 1); assert.equal(env.snapshot.config.enabled, false);
 });
 
-test("a stronger asynchronous change restores invoking focus after busy disabling blurs the control", async (t) => {
+test("an asynchronous save locks all edits and restores focus to the draft heading", async (t) => {
   let release;
   const waiting = new Promise((resolve) => { release = resolve; });
   const env = await loadSurface(t, "options", {}, { beforeRequest: () => waiting });
-  await env.dispatch("delay-input", "5"); await env.confirm();
-  const input = env.document.getElementById("delay-input");
-  assert.equal(input.disabled, true);
-  env.document.body.tabIndex = -1; env.document.body.focus(); assert.equal(env.document.activeElement, env.document.body);
+  await env.dispatch("delay-input", "5"); await env.save(); await env.confirm();
+  assert.equal(env.document.getElementById("delay-input").disabled, true);
+  assert.equal(env.document.getElementById("discard-settings").disabled, true);
+  env.document.body.tabIndex = -1; env.document.body.focus();
   release(); await settle();
-  assert.equal(input.disabled, false);
-  assert.equal(env.document.activeElement.id, input.id);
+  assert.equal(env.document.getElementById("delay-input").disabled, false);
+  assert.equal(env.document.activeElement.id, "settings-draft-title");
 });
 
-test("tracked-site controls retain wait, budget, reached-limit policy, cooldown duration, and removal", async (t) => {
+test("site drafts retain dependent policy values and are saved with waits and budgets together", async (t) => {
   const env = await loadSurface(t, "options", { dailyLimits: { "example.com": 30 } });
-  for (const [id, value, patch] of [
-    ["site-wait-example.com", false, { siteWaitEnabled: { "example.com": false } }],
-    ["site-limit-example.com", "20", { dailyLimits: { "example.com": 20 } }],
-    ["site-policy-example.com", "cooldown", { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 60 } } }],
-    ["site-cooldown-example.com", "45", { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 45 } } }],
-    ["site-policy-example.com", "block", { dailyLimitPolicies: { "example.com": { mode: "block", cooldownMinutes: 45 } } }],
-    ["site-limit-example.com", "", { dailyLimits: { "example.com": null } }]
-  ]) { await env.dispatch(id, value); await env.confirm(); assert.deepEqual(env.requests.at(-1).patch, patch); }
-  env.document.querySelector(".site-remove").click(); await settle(); await env.confirm();
-  assert.deepEqual(env.requests.at(-1).patch, { sites: [] });
+  for (const [id, value] of [["site-wait-example.com", false], ["site-limit-example.com", "20"], ["site-policy-example.com", "cooldown"], ["site-cooldown-example.com", "45"]]) await env.dispatch(id, value);
+  assert.equal(env.requests.length, 0);
+  await env.save(); await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { siteWaitEnabled: { "example.com": false }, dailyLimits: { "example.com": 20 }, dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 45 } } });
+  await env.dispatch("site-policy-example.com", "block");
+  await env.dispatch("site-limit-example.com", "");
+  await env.save(); await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { dailyLimits: { "example.com": null }, dailyLimitPolicies: { "example.com": { mode: "block", cooldownMinutes: 45 } } });
+  env.document.querySelector(".site-remove").click(); await settle();
   assert.equal(env.document.querySelectorAll(".site-detail").length, 0);
+  assert.deepEqual(env.snapshot.config.sites, ["example.com"]);
+  await env.save(); await env.confirm(); assert.deepEqual(env.requests.at(-1).patch, { sites: [] });
 });
 
-test("inactive limit preferences stay editable and changing break duration does not enable the action", async (t) => {
+test("inactive limit preferences stay editable and break duration preserves the draft mode", async (t) => {
   const env = await loadSurface(t, "options", { enabled: false });
-  const cooldown = env.document.getElementById("site-cooldown-example.com");
-  assert.equal(cooldown.disabled, false);
-  assert.equal(env.document.getElementById("site-policy-example.com").disabled, false);
-  await env.dispatch(cooldown.id, "15");
+  await env.dispatch("site-cooldown-example.com", "15");
+  await env.save();
   assert.match(env.document.getElementById("confirm-dialog-differences").textContent, /saved break: 15 minutes/);
-  await env.confirm();
-  assert.deepEqual(env.requests.at(-1).patch, { dailyLimitPolicies: { "example.com": { mode: "block", cooldownMinutes: 15 } } });
-  assert.deepEqual(env.snapshot.config.dailyLimits, {});
-  assert.equal(env.snapshot.config.enabled, false);
-  await env.dispatch("site-policy-example.com", "cooldown"); await env.confirm();
-  assert.deepEqual(env.requests.at(-1).patch, { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 15 } } });
-  assert.deepEqual(env.snapshot.config.dailyLimits, {});
+  await env.confirm("cancel");
+  await env.dispatch("site-policy-example.com", "cooldown");
+  await env.dispatch("site-cooldown-example.com", "20");
+  await env.save(); await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 20 } } });
+  assert.deepEqual(env.snapshot.config.dailyLimits, {}); assert.equal(env.snapshot.config.enabled, false);
 });
 
-test("each collapsed site can pause and resume tracking without removing its settings or totals", async (t) => {
+test("collapsed site tracking stages pause and resume while active totals stay authoritative", async (t) => {
   const env = await loadSurface(t, "options", { dailyLimits: { "example.com": 30 }, siteWaitEnabled: { "example.com": false } });
   const id = "site-tracking-example.com";
   assert.equal(env.document.querySelector(".site-detail").open, false);
-  assert.equal(env.document.querySelector(".site-detail").contains(env.document.getElementById(id)), false, "pause remains outside collapsed details");
+  assert.equal(env.document.querySelector(".site-detail").contains(env.document.getElementById(id)), false);
   await env.dispatch(id, undefined, "click");
-  assert.match(env.document.getElementById("confirm-dialog-differences").textContent, /Site tracking for example.com: On → Off/);
-  await env.confirm("cancel");
-  assert.deepEqual(env.snapshot.config.siteTrackingEnabled, {});
-  await env.dispatch(id, undefined, "click"); await env.confirm();
-  assert.deepEqual(env.requests.at(-1).patch, { siteTrackingEnabled: { "example.com": false } });
   assert.equal(env.document.getElementById(id).textContent, "Resume");
-  assert.match(env.document.querySelector(".site-usage").textContent, /^Paused/);
-  assert.equal(env.document.getElementById("site-limit-example.com").disabled, false);
+  assert.deepEqual(env.snapshot.config.siteTrackingEnabled, {});
+  assert.equal(env.document.activeElement.id, id);
+  await env.save();
+  assert.match(env.document.getElementById("confirm-dialog-differences").textContent, /Site tracking for example.com: On → Off/);
+  await env.confirm(); assert.match(env.document.querySelector(".site-usage").textContent, /^Paused/);
   assert.deepEqual(env.snapshot.config.dailyLimits, { "example.com": 30 });
   assert.deepEqual(env.snapshot.usage.sites, { "example.com": 90000 });
-  assert.equal(env.document.activeElement.id, id);
-  await env.dispatch(id, undefined, "click"); await env.confirm();
+  await env.dispatch(id, undefined, "click"); await env.save(); await env.confirm();
   assert.deepEqual(env.requests.at(-1).patch, { siteTrackingEnabled: { "example.com": null } });
-  assert.deepEqual(env.snapshot.config.siteTrackingEnabled, {});
-  assert.equal(env.document.getElementById(id).textContent, "Pause");
 });
 
-test("popup and options can add a tracked site with no entry wait", async (t) => {
+test("popup adds immediately after confirmation while options stages a site with no entry wait", async (t) => {
   const popup = await loadSurface(t, "popup");
   popup.document.getElementById("add-site-wait").checked = false;
   await popup.dispatch("add-current-btn", undefined, "click"); await popup.confirm();
@@ -254,112 +338,155 @@ test("popup and options can add a tracked site with no entry wait", async (t) =>
   const options = await loadSurface(t);
   options.document.getElementById("site-input").value = "https://www.social.example/feed";
   options.document.getElementById("add-site-wait").checked = false;
-  options.document.getElementById("add-site-form").dispatchEvent(new options.window.Event("submit", { bubbles: true, cancelable: true })); await settle(); await options.confirm();
+  options.document.getElementById("add-site-form").dispatchEvent(new options.window.Event("submit", { bubbles: true, cancelable: true })); await settle();
+  assert.equal(options.requests.length, 0);
+  assert.ok(options.document.getElementById("site-wait-social.example"));
+  assert.match(options.document.querySelector('[data-site="social.example"] .site-usage').textContent, /not tracked yet/);
+  await options.save(); await options.confirm();
   assert.deepEqual(options.requests.at(-1).patch, { sites: ["example.com", "social.example"], siteWaitEnabled: { "social.example": false } });
 });
 
-test("all 19 content controls submit isolated guarded patches, with exact value differences", async (t) => {
-  const env = await loadSurface(t);
+test("all 19 content controls stage and save one atomic patch with exact review differences", async (t) => {
+  const env = await loadSurface(t); const patch = { contentControls: {} };
   assert.equal(controls.catalog.length, 19);
   for (const item of controls.catalog) {
     const value = item.type === "boolean" ? true : item.options.find((option) => option.value !== item.default).value;
     await env.dispatch("rule-" + item.id, value);
-    const text = env.document.getElementById("confirm-dialog-differences").textContent;
-    assert.ok(text.includes(item.label)); assert.ok(text.includes("→"));
-    await env.confirm();
-    assert.deepEqual(env.requests.at(-1).patch, { contentControls: { [item.platform]: { [item.key]: value } } });
+    (patch.contentControls[item.platform] ||= {})[item.key] = value;
+    assert.equal(env.document.getElementById("confirm-dialog").open, false);
   }
+  await env.save();
+  const text = env.document.getElementById("confirm-dialog-differences").textContent;
+  controls.catalog.forEach((item) => assert.ok(text.includes(item.label)));
+  await env.confirm(); assert.equal(env.requests.length, 1); assert.deepEqual(env.requests[0].patch, patch);
   assert.deepEqual(env.snapshot.config.sites, ["example.com"]);
 });
 
-test("presets are additive atomic changes and a platform bulk disable includes all its rules", async (t) => {
+test("presets merge into drafts and bulk disable replaces edited platform values", async (t) => {
   const prefs = controls.getDefaults(); prefs.instagram.hideComments = true;
   const env = await loadSurface(t, "options", { contentControls: prefs });
-  await env.dispatch("short-form-preset", undefined, "click"); await env.confirm();
-  assert.deepEqual(env.requests.at(-1).patch, controls.getPreset("short-form"));
-  assert.equal(env.snapshot.config.contentControls.instagram.hideComments, true);
-  await env.dispatch("inbox-preset", undefined, "click"); await env.confirm();
-  assert.deepEqual(env.requests.at(-1).patch, controls.getPreset("instagram-inbox"));
-  env.document.querySelector("#instagram .danger").click(); await settle(); await env.confirm();
-  assert.deepEqual(env.requests.at(-1).patch, { contentControls: { instagram: controls.getDefaults().instagram } });
+  await env.dispatch("rule-instagram.hideVideos", true);
+  await env.dispatch("short-form-preset", undefined, "click");
+  await env.dispatch("inbox-preset", undefined, "click");
+  assert.equal(env.document.getElementById("rule-instagram.hideComments").checked, true);
+  assert.equal(env.document.getElementById("rule-instagram.hideVideos").checked, true);
+  assert.equal(env.requests.length, 0);
+  env.document.querySelector("#instagram .danger").click(); await settle();
+  assert.equal(env.document.getElementById("rule-instagram.hideVideos").checked, false);
+  assert.equal(env.document.getElementById("rule-instagram.hideComments").checked, false);
+  await env.save(); await env.confirm();
   assert.equal(env.snapshot.config.contentControls.youtube.hideShorts, true);
+  assert.deepEqual(env.snapshot.config.contentControls.instagram, controls.getDefaults().instagram);
   assert.deepEqual(env.snapshot.config.sites, ["example.com"]);
 });
 
-test("settings hold accepts zero while site waits remain at least one minute", async (t) => {
+test("settings hold accepts zero and independent confirmation explains immediate changes", async (t) => {
   const env = await loadSurface(t);
-  const input = await env.dispatch("settings-delay-input", "0");
-  assert.equal(input.min, "0");
-  assert.equal(input.validationMessage, "");
-  assert.equal(env.requests.length, 0);
-  await env.confirm("cancel");
-  assert.equal(env.snapshot.config.settingsDelayMinutes, 2);
-  await env.dispatch("settings-delay-input", "0");
-  await env.confirm();
-  assert.deepEqual(env.requests.at(-1).patch, { settingsDelayMinutes: 0 });
-  assert.equal(env.snapshot.config.settingsDelayMinutes, 0);
-  assert.equal(env.snapshot.config.delayMinutes, 2);
-
+  const input = await env.dispatch("settings-delay-input", "0"); assert.equal(input.min, "0"); assert.equal(input.validationMessage, "");
+  await env.save(); await env.confirm("cancel"); assert.equal(env.snapshot.config.settingsDelayMinutes, 2);
+  await env.save(); await env.confirm(); assert.deepEqual(env.requests.at(-1).patch, { settingsDelayMinutes: 0 });
   await env.dispatch("enabled-toggle", false);
   assert.match(env.document.getElementById("confirm-dialog-message").textContent, /0 minutes.*immediately after confirmation/);
-  assert.equal(env.requests.length, 1);
-  await env.confirm();
-  assert.equal(env.snapshot.config.enabled, false);
+  await env.confirm(); assert.equal(env.snapshot.config.enabled, false);
 });
 
-test("validation rejects malformed numbers and equal schedules without a command", async (t) => {
+test("Save rejects invalid fields across panels even when a valid change is staged", async (t) => {
   const env = await loadSurface(t);
+  await env.dispatch("moving-target-toggle", true);
   for (const [id, value] of [["delay-input", "0"], ["settings-delay-input", "-1"], ["settings-delay-input", "1.5"], ["site-limit-example.com", "1441"], ["daily-lock-start", "07:00"]]) {
+    const old = env.document.getElementById(id).value;
     const input = await env.dispatch(id, value);
-    assert.equal(env.document.getElementById("confirm-dialog").open, false);
     assert.ok(input.validationMessage);
+    await env.save(); assert.equal(env.document.getElementById("confirm-dialog").open, false);
+    await env.dispatch(id, old);
   }
   assert.equal(env.requests.length, 0);
+  // Save also reads a raw, uncommitted input value and exposes its hidden panel.
+  const raw = env.document.getElementById("site-cooldown-example.com"); raw.value = "0";
+  raw.dispatchEvent(new env.window.Event("input", { bubbles: true }));
+  await env.save(); assert.equal(env.document.getElementById("confirm-dialog").open, false);
+  assert.equal(env.document.getElementById("sites").hidden, false); assert.equal(env.document.activeElement.id, raw.id);
 });
 
-test("a rejected domain can be corrected and submitted through native form validation", async (t) => {
-  const env = await loadSurface(t);
-  const input = env.document.getElementById("site-input");
-  const form = env.document.getElementById("add-site-form");
-  input.value = "not a domain"; form.requestSubmit(); await settle();
-  assert.ok(input.validationMessage);
-  input.value = "social.example"; input.dispatchEvent(new env.window.Event("input", { bubbles: true }));
-  assert.equal(input.validationMessage, "");
-  form.requestSubmit(); await settle(); await env.confirm();
-  assert.ok(env.snapshot.config.sites.includes("social.example"));
+test("a rejected domain can be corrected and added through native form validation", async (t) => {
+  const env = await loadSurface(t); const input = env.document.getElementById("site-input"); const form = env.document.getElementById("add-site-form");
+  input.value = "not a domain"; form.requestSubmit(); await settle(); assert.ok(input.validationMessage);
+  input.value = "social.example"; input.dispatchEvent(new env.window.Event("input", { bubbles: true })); assert.equal(input.validationMessage, "");
+  form.requestSubmit(); await settle(); await env.save(); await env.confirm(); assert.ok(env.snapshot.config.sites.includes("social.example"));
 });
 
-test("configuration refresh preserves keyboard focus on a site disclosure summary", async (t) => {
-  const env = await loadSurface(t);
-  const summary = env.document.querySelector("#site-list summary");
-  summary.focus();
+test("configuration refresh preserves focus on a site disclosure summary", async (t) => {
+  const env = await loadSurface(t); const summary = env.document.querySelector("#site-list summary"); summary.focus();
   await env.notify((snapshot) => { snapshot.revision++; snapshot.config.delayMinutes = 5; });
-  const replacement = env.document.querySelector("#site-list summary");
-  assert.notEqual(replacement, summary);
-  assert.equal(env.document.activeElement, replacement);
+  const replacement = env.document.querySelector("#site-list summary"); assert.notEqual(replacement, summary); assert.equal(env.document.activeElement, replacement);
 });
 
-test("usage and lease refresh preserve in-progress inputs, open disclosure, and keyboard focus", async (t) => {
-  const env = await loadSurface(t);
-  const details = env.document.querySelector("details"); details.open = true;
+test("usage and revision refresh preserve raw drafts, disclosure and focus, with explicit rebase", async (t) => {
+  const env = await loadSurface(t); const details = env.document.querySelector("details"); details.open = true;
   const input = env.document.getElementById("site-limit-example.com"); input.focus(); input.value = "42";
   input.dispatchEvent(new env.window.Event("input", { bubbles: true }));
   await env.notify((snapshot) => { snapshot.usage.sites["example.com"] = 300_000; });
-  assert.equal(env.document.getElementById(input.id), input);
-  assert.equal(input.value, "42"); assert.equal(env.document.activeElement, input); assert.equal(details.open, true);
-  assert.ok(env.document.querySelector(".site-usage").textContent.includes("5 min"));
+  assert.equal(env.document.getElementById(input.id), input); assert.equal(input.value, "42"); assert.equal(env.document.activeElement, input); assert.equal(details.open, true);
+  assert.match(env.document.querySelector(".site-usage").textContent, /5 min/);
   await env.notify((snapshot) => { snapshot.revision++; snapshot.config.delayMinutes = 5; });
-  assert.equal(env.document.getElementById(input.id).value, "42");
-  assert.equal(env.document.activeElement.id, input.id);
+  assert.equal(env.document.getElementById(input.id).value, "42"); assert.equal(env.document.getElementById("delay-input").value, "2");
+  assert.equal(env.document.activeElement.id, input.id); assert.equal(env.document.getElementById("save-settings").disabled, true);
+  await env.dispatch("rebase-settings", undefined, "click"); await env.confirm();
+  assert.equal(env.document.getElementById("delay-input").value, "5"); assert.equal(env.document.getElementById(input.id).value, "42");
+  await env.save(); await env.confirm(); assert.deepEqual(env.requests.at(-1).patch, { dailyLimits: { "example.com": 42 } }); assert.equal(env.requests.at(-1).expectedRevision, 2);
+});
+
+test("pending batch locks draft actions, cancellation retains draft, and completion clears it", async (t) => {
+  const env = await loadSurface(t, "options", {}, { pendingRequests: true });
+  await env.dispatch("delay-input", "1"); await env.dispatch("rule-youtube.hideShorts", true); await env.save(); await env.confirm();
+  assert.equal(env.requests.length, 1); assert.equal(env.snapshot.config.delayMinutes, 2);
+  assert.equal(env.document.getElementById("delay-input").value, "1"); assert.equal(env.document.getElementById("discard-settings").disabled, true);
+  assert.match(env.document.getElementById("settings-draft-status").textContent, /Submitted/);
+  await env.dispatch("pending-config-cancel", undefined, "click");
+  assert.equal(env.document.getElementById("delay-input").value, "1"); assert.equal(env.document.getElementById("save-settings").disabled, false);
+  await env.save(); await env.confirm();
+  await env.notify((snapshot) => { snapshot.config.delayMinutes = 1; snapshot.config.contentControls.youtube.hideShorts = true; snapshot.revision++; snapshot.pending = null; snapshot.applied = true; });
+  assert.equal(env.document.getElementById("save-settings").disabled, true); assert.equal(env.document.activeElement.id, "settings-draft-title");
+});
+
+test("Discard clears invalid draft fields and restores all panels without commands", async (t) => {
+  const env = await loadSurface(t);
+  await env.dispatch("delay-input", "0");
+  await env.dispatch("site-policy-example.com", "cooldown");
+  await env.dispatch("rule-instagram.hideComments", true);
+  await env.dispatch("discard-settings", undefined, "click");
+  assert.equal(env.document.getElementById("delay-input").value, "2");
+  assert.equal(env.document.getElementById("delay-input").validationMessage, "");
+  assert.equal(env.document.getElementById("site-policy-example.com").value, "block");
+  assert.equal(env.document.getElementById("rule-instagram.hideComments").checked, false);
+  assert.equal(env.requests.length, 0);
+});
+
+test("remove and re-add within a draft retains saved site preferences and can be a no-op", async (t) => {
+  const env = await loadSurface(t, "options", { dailyLimits: { "example.com": 30 }, dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 15 } } });
+  env.document.querySelector(".site-remove").click(); await settle();
+  env.document.getElementById("site-input").value = "example.com";
+  env.document.getElementById("add-site-form").requestSubmit(); await settle();
+  assert.equal(env.document.getElementById("site-limit-example.com").value, "30");
+  assert.equal(env.document.getElementById("site-policy-example.com").value, "cooldown");
+  assert.equal(env.document.getElementById("site-cooldown-example.com").value, "15");
+  await env.save();
+  assert.equal(env.document.getElementById("confirm-dialog").open, false);
+  assert.equal(env.requests.length, 0);
+});
+
+test("an input-only edit is validated and included when Save is clicked directly", async (t) => {
+  const env = await loadSurface(t);
+  await env.dispatch("settings-delay-input", "0", "input");
+  await env.dispatch("site-limit-example.com", "45", "input");
+  await env.save(); await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { settingsDelayMinutes: 0, dailyLimits: { "example.com": 45 } });
 });
 
 test("future schema disables only content edits while General stays usable", async (t) => {
-  const env = await loadSurface(t);
-  await env.notify((snapshot) => { snapshot.contentControlsSupported = false; });
-  assert.equal(env.document.getElementById("rule-youtube.hideShorts").disabled, true);
-  assert.equal(env.document.getElementById("short-form-preset").disabled, true);
-  assert.equal(env.document.getElementById("delay-input").disabled, false);
-  assert.match(env.document.getElementById("instagram-status").textContent, /newer Airlock/);
+  const env = await loadSurface(t); await env.notify((snapshot) => { snapshot.contentControlsSupported = false; });
+  assert.equal(env.document.getElementById("rule-youtube.hideShorts").disabled, true); assert.equal(env.document.getElementById("short-form-preset").disabled, true);
+  assert.equal(env.document.getElementById("delay-input").disabled, false); assert.match(env.document.getElementById("instagram-status").textContent, /newer Airlock/);
 });
 
 test("popup reports access needed or unavailable page state without claiming enforced access", async (t) => {
@@ -409,7 +536,7 @@ test("popup rechecks after a master-off hold completes, but does not probe each 
   assert.match(env.document.getElementById("current-access").textContent, /Page status updating/);
   coreMode = "none";
   await env.advanceTime(150);
-  assert.equal(env.document.getElementById("current-access").textContent, "Restrictions off · usage tracking continues");
+  assert.equal(env.document.getElementById("current-access").textContent, "Site restrictions off · usage tracking continues");
   assert.equal(env.pageMessages.length, 3);
   assert.equal(env.storageSets.length, 0);
 });
@@ -451,9 +578,9 @@ test("popup ignores a delayed response for an earlier authoritative status", asy
   });
   await env.notify((snapshot) => { snapshot.revision++; snapshot.currentSiteStatus.reason = "cooldown"; snapshot.currentSiteStatus.unlockAt = Date.now() + 3_600_000; });
   await env.notify((snapshot) => { snapshot.revision++; snapshot.config.enabled = false; snapshot.currentSiteStatus.reason = "disabled"; });
-  assert.equal(env.document.getElementById("current-access").textContent, "Restrictions off · usage tracking continues");
+  assert.equal(env.document.getElementById("current-access").textContent, "Site restrictions off · usage tracking continues");
   finishOldProbe({ ok: true, ready: true, coreMode: "cooldown" }); await settle();
-  assert.equal(env.document.getElementById("current-access").textContent, "Restrictions off · usage tracking continues");
+  assert.equal(env.document.getElementById("current-access").textContent, "Site restrictions off · usage tracking continues");
   await env.advanceTime(10_000);
   assert.equal(env.pageMessages.length, 3);
 });
@@ -527,12 +654,21 @@ test("client keeps newer configuration and same-revision pending progress when r
 
 test("UI captures confirmation revision, and stale errors preserve current authoritative values", async (t) => {
   const env = await loadSurface(t);
-  await env.dispatch("delay-input", "5");
+  await env.dispatch("delay-input", "5"); await env.save();
   await env.notify((snapshot) => { snapshot.config.delayMinutes = 3; snapshot.revision++; });
   await env.confirm();
   assert.equal(env.requests.at(-1).expectedRevision, 1);
   assert.equal(env.snapshot.config.delayMinutes, 3);
   assert.match(env.document.getElementById("ui-status").textContent, /another view/);
+  assert.equal(env.document.getElementById("delay-input").value, "5");
+  assert.equal(env.document.getElementById("save-settings").disabled, true);
+  assert.equal(env.requests.length, 1, "a stale save must never retry automatically");
+  await env.dispatch("rebase-settings", undefined, "click");
+  assert.match(env.document.getElementById("confirm-dialog-differences").textContent, /3 → 5/);
+  await env.confirm("cancel"); assert.equal(env.document.getElementById("save-settings").disabled, true);
+  await env.dispatch("rebase-settings", undefined, "click"); await env.confirm();
+  await env.save(); await env.confirm();
+  assert.equal(env.requests.length, 2); assert.equal(env.requests[1].expectedRevision, 2);
 });
 
 test("domain input rejects internal schemes, credentials, invalid labels, and whitespace", () => {

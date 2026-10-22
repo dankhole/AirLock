@@ -4,6 +4,7 @@ const assert=require("node:assert/strict");
 const {root,poll}=require("./driver");
 const {runUiChecks}=require("./ui-checks");
 const {runSiteSettingsChecks}=require("./site-settings-checks");
+const {runContentSwitchChecks}=require("./content-switch-checks");
 
 async function runScenario(browser,t) {
   t.diagnostic(`${browser.name} ${browser.version}; actual temporary extension, synthetic HTTPS site origins`);
@@ -27,12 +28,15 @@ async function runScenario(browser,t) {
   await browser.focus(options);
   await poll(()=>browser.evaluate(options,()=>!document.getElementById("short-form-preset").disabled),Boolean,"preset UI ready");
   await browser.click(options,"#short-form-preset");
+  assert.equal((await send({type:"GET_SETTINGS_STATE"})).config.contentControls.youtube.hideShorts,false,"preset is only a draft until Save");
+  assert.equal(await browser.evaluate(options,()=>document.getElementById("confirm-dialog").open),false,"editing a preset does not interrupt batching");
+  await browser.click(options,"#save-settings");
   await poll(()=>browser.evaluate(options,()=>document.getElementById("confirm-dialog").open),Boolean,"preset confirmation dialog");
   assert.ok(await browser.evaluate(options,()=>document.querySelectorAll("#confirm-dialog-differences li").length)>0,"exact changes shown");
   await browser.click(options,"#confirm-dialog-submit");
   state=await poll(()=>send({type:"GET_SETTINGS_STATE"}),value=>value.ok&&value.config.contentControls.youtube.hideShorts,"UI-confirmed preset authority applies");
   assert.deepEqual(state.config.sites,[]);
-  await poll(()=>browser.evaluate(options,()=>document.activeElement?.id),value=>value==="short-form-preset","focus restored after stronger preset confirmation");
+  await poll(()=>browser.evaluate(options,()=>document.activeElement?.id),value=>value==="settings-draft-title","focus restored after saving stronger preset");
   for(const site of Object.keys(pages)){
     const page=pages[site];
     await poll(()=>browser.evaluate(page,()=>getComputedStyle(document.getElementById("short-card")).display),value=>value==="none",`${site} computed hiding`);
@@ -58,8 +62,33 @@ async function runScenario(browser,t) {
   assert.equal(await browser.evaluate(pages.youtube,()=>location.pathname),"/shorts/abcdefghijk","active core gate defers route navigation");
   await browser.focus(options);
   state=await send({type:"GET_SETTINGS_STATE"});
-  state=await send({type:"REQUEST_CONFIG_CHANGE",expectedRevision:state.revision,patch:{settingsDelayMinutes:0,siteWaitEnabled:{"youtube.com":false},contentControls:{youtube:{hideShorts:false,hideNavigation:false,shortsRoute:"allow"},facebook:{hideReels:false,reelsRoute:"allow"},instagram:{blockReels:false}}}});
-  assert.equal(state.ok,true);assert.equal(state.applied,false);assert.ok(state.pending?.id,"weakening creates pending hold");
+  const beforeBatch=state;
+  // Stage across panels without granting or requesting any hold time.
+  await browser.evaluate(options,()=>{
+    function edit(id,value) {
+      const input=document.getElementById(id);
+      if(input.type==="checkbox")input.checked=value;else input.value=value;
+      input.dispatchEvent(new Event("input",{bubbles:true}));
+      input.dispatchEvent(new Event("change",{bubbles:true}));
+    }
+    edit("settings-delay-input","0");
+    edit("moving-target-toggle",true);
+    edit("site-wait-youtube.com",false);
+    for(const [id,value] of [["rule-youtube.hideShorts",false],["rule-youtube.hideNavigation",false],["rule-youtube.shortsRoute","allow"],["rule-facebook.hideReels",false],["rule-facebook.reelsRoute","allow"],["rule-instagram.blockReels",false]])edit(id,value);
+  });
+  state=await send({type:"GET_SETTINGS_STATE"});
+  assert.equal(state.revision,beforeBatch.revision,"multiple draft edits do not mutate authority");
+  assert.equal(state.pending,null,"no hold starts while editing");
+  assert.equal(await browser.evaluate(options,()=>document.getElementById("confirm-dialog").open),false);
+  await browser.screenshot(options,path.join(artifacts,"options-unsaved-batch.png"),1280);
+  await browser.click(options,"#save-settings");
+  await poll(()=>browser.evaluate(options,()=>document.getElementById("confirm-dialog").open),Boolean,"batch Save review");
+  assert.ok(await browser.evaluate(options,()=>document.querySelectorAll("#confirm-dialog-differences li").length)>=8,"all batch differences reviewed together");
+  await browser.click(options,"#confirm-dialog-submit");
+  state=await poll(()=>send({type:"GET_SETTINGS_STATE"}),value=>value.ok&&Boolean(value.pending),"one pending batch after Save");
+  assert.equal(state.config.movingTargetEnabled,false,"stronger part waits with the mixed batch");
+  assert.equal(state.config.settingsDelayMinutes,1,"reducing settings hold uses the old duration");
+  assert.ok(state.pending?.id,"weakening creates one pending hold");
   await poll(()=>browser.evaluate(options,()=>!document.getElementById("pending-config-section").hidden),Boolean,"pending UI rendered");
   await browser.screenshot(options,path.join(artifacts,"options-pending.png"),1280);
   const popup=browser.newPopup ? await browser.newPopup(pages.youtube) : await browser.newPage();
@@ -95,12 +124,14 @@ async function runScenario(browser,t) {
   }finally{await releaseKeyboard();}
   assert.equal(progress.config.contentControls.youtube.hideShorts,false,"keyboard hold applied the weakening");
   assert.equal(progress.config.siteWaitEnabled["youtube.com"],false);
+  assert.equal(progress.config.movingTargetEnabled,true,"stronger part applies atomically with the weakening");
   assert.equal(progress.config.settingsDelayMinutes,0,"zero-minute hold persists after the previous hold completes");
   assert.equal((await send({type:"ADVANCE_PENDING_CONFIG_CHANGE",pendingId,clientId:"stale-browser-view",sequence:1,elapsedMs:1000})).reason,"stale-pending","completed hold cannot be replayed");
   for(const site of Object.keys(pages)){
     await poll(()=>browser.evaluate(pages[site],()=>getComputedStyle(document.getElementById("short-card")).display),value=>value!=="none",`${site} disable restores computed visibility`);
     assert.equal(await browser.evaluate(pages[site],()=>document.querySelectorAll("[data-airlock-hidden],[data-airlock-subdued]").length),0,`${site} marks removed`);
   }
+  await runContentSwitchChecks(browser,options,pages.youtube,t);
   await runSiteSettingsChecks(browser,options,pages.youtube,artifacts,t);
   await browser.focus(options);
   await browser.screenshot(options,path.join(artifacts,"options-desktop.png"),1280);

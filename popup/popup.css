@@ -2,15 +2,17 @@
    optional detail in bounded disclosures, rather than scrolling the whole panel. */
 html { background: var(--surface); }
 body { width: 360px; max-width: 100vw; background: var(--surface); }
-.popup { padding: 12px 16px; display: grid; gap: 10px; }
+.popup { padding: 10px 16px; display: grid; gap: 6px; }
 .visually-hidden, .popup:has(#pending-config-section:not([hidden])) .status-message:not(.error) { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .popup-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; }
 .popup-header h1 { font-size: 1.45rem; }
 .popup-header a, .site-actions a { display: inline-flex; align-items: center; min-height: 36px; }
 .restrictions-control { justify-content: space-between; align-items: center; padding: 0; }
+.master-controls { display: grid; gap: 4px; }
 .restrictions-control > span { display: grid; }
 .restrictions-control input { width: 22px; height: 22px; }
 .popup:has(#pending-config-section:not([hidden])) .restrictions-control .help { display: none; }
+.popup:has(#pending-config-section:not([hidden])) .restrictions-control { min-height: 32px; }
 .status-message { font-size: .92rem; min-height: 0; }
 .status-message:empty { display: none; }
 .current-site { min-width: 0; padding: 10px 12px; background: var(--background); border: 1px solid var(--border); border-radius: 8px; }

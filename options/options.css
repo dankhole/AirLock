@@ -7,6 +7,12 @@
 .settings-nav a:hover { background: #e8edf6; }
 .settings-nav a[aria-current="page"] { background: #e3ebfa; color: #193f82; font-weight: 600; }
 main { min-width: 0; }
+.settings-draft { position: sticky; top: 12px; z-index: 1; padding: 16px; margin-block: 16px 24px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.settings-draft h2 { font-size: 1rem; margin-bottom: 6px; }
+.settings-draft .action-row { margin-top: 12px; }
+.settings-draft.has-draft { border-color: var(--notice-border); background: var(--notice); }
+.settings-draft ul { max-height: 150px; overflow-y: auto; margin-block: 10px; padding-left: 20px; }
+.settings-draft li { overflow-wrap: anywhere; }
 .settings-panel > h2 { margin-bottom: 16px; }
 .panel-intro { margin-bottom: 20px; }
 .settings-panel .section:first-of-type { margin-top: 22px; }
@@ -37,6 +43,7 @@ main { min-width: 0; }
 .permission-status { margin-block: 10px; }
 .support-note { margin-block: 14px; }
 @media (max-width: 680px) {
+  .settings-draft { position: static; }
   .settings-shell { display: block; padding: 22px 18px; }
   .settings-header { padding-bottom: 16px; }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 18px; }

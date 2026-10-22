@@ -13,16 +13,23 @@
     <nav class="settings-nav" aria-label="Settings"><a href="#general" aria-current="page">General</a><a href="#sites">Sites &amp; usage</a><a href="#youtube">YouTube</a><a href="#instagram">Instagram</a><a href="#facebook">Facebook</a></nav>
     <main id="settings-main">
       <p id="ui-status" class="status-message" role="status" aria-live="polite">Loading settings…</p>
+      <section id="settings-draft" class="settings-draft" aria-labelledby="settings-draft-title">
+        <h2 id="settings-draft-title" tabindex="-1">Settings changes</h2>
+        <p id="settings-draft-status" class="help" role="status" aria-live="polite">Changes below are saved together. Site restrictions, Content blocking, and manual cooldown have their own confirmation.</p>
+        <ul id="settings-draft-differences" hidden></ul>
+        <div class="action-row"><button type="button" id="save-settings" class="primary" data-setting disabled>Save changes</button><button type="button" id="discard-settings" data-setting disabled>Discard</button><button type="button" id="rebase-settings" data-setting hidden>Review latest settings…</button></div>
+      </section>
       <section id="pending-config-section" class="pending-change" aria-labelledby="pending-config-title" hidden>
         <h2 id="pending-config-title">Settings change awaiting hold</h2><ul id="pending-config-differences"></ul>
         <div id="pending-config-timer" class="pending-countdown" aria-label="Remaining hold time">0:00</div>
         <p id="pending-config-engagement" class="help" role="status">Paused · engage the target to count down</p>
-        <p class="help">Hover here or hold Space/Enter to count down. On touch, press and hold. Current restrictions stay in effect. Progress pauses when this view is hidden or unfocused.</p>
+        <p class="help">Hover here or hold Space/Enter to count down. On touch, press and hold. Current settings stay in effect. Progress pauses when this view is hidden or unfocused.</p>
         <div class="action-row"><button type="button" id="pending-config-hover-target" class="hold-target">Hold to apply change</button><button type="button" id="pending-config-cancel">Cancel change</button></div>
       </section>
       <section id="general" class="settings-panel" aria-labelledby="general-title">
         <h2 id="general-title" tabindex="-1">General</h2>
-        <label class="check-label"><input type="checkbox" id="enabled-toggle" data-setting aria-describedby="master-help"><strong>Restrictions</strong></label><p id="master-help" class="help"></p>
+        <label class="check-label"><input type="checkbox" id="enabled-toggle" data-setting aria-describedby="master-help"><strong>Site restrictions</strong></label><p id="master-help" class="help"></p>
+        <label class="check-label"><input type="checkbox" id="content-controls-toggle" data-setting aria-describedby="content-controls-help"><strong>Content blocking</strong></label><p id="content-controls-help" class="help"></p>
         <section class="section stack" aria-labelledby="waits-title">
           <h3 id="waits-title">Intentional friction</h3>
           <div class="field"><label for="delay-input">Site wait</label><div class="field-inline"><input type="number" id="delay-input" min="1" max="600" step="1" required data-setting aria-describedby="delay-help"><span>minutes</span></div><p id="delay-help" class="help">Countdown before entering a tracked site with its site wait enabled. Range: 1–600 minutes.</p></div>
@@ -35,12 +42,12 @@
           <p id="daily-lock-help" class="help">Your local time. A schedule may cross midnight; start and end must differ.</p><p id="daily-lock-status" class="status-message"></p>
         </section>
         <section class="section" aria-labelledby="cooldown-title"><h3 id="cooldown-title">Manual cooldown</h3><p id="cooldown-status" class="help"></p><button type="button" id="cooldown-btn" data-setting>Start 1-hour cooldown</button></section>
-        <section class="section" aria-labelledby="presets-title"><h3 id="presets-title">Content presets</h3><p class="help">Add the displayed rules while keeping unrelated preferences and tracking intact. Review exact changes before applying.</p><div class="action-row"><button type="button" id="short-form-preset" data-setting data-content-setting>Hide short-form content…</button><button type="button" id="inbox-preset" data-setting data-content-setting>Instagram inbox focus…</button></div></section>
+        <section class="section" aria-labelledby="presets-title"><h3 id="presets-title">Content presets</h3><p class="help">Add the displayed rules to your draft while keeping unrelated preferences and tracking intact. Save changes to review and apply them.</p><div class="action-row"><button type="button" id="short-form-preset" data-setting data-content-setting>Hide short-form content</button><button type="button" id="inbox-preset" data-setting data-content-setting>Instagram inbox focus</button></div></section>
       </section>
       <section id="sites" class="settings-panel" aria-labelledby="sites-title" hidden>
-        <h2 id="sites-title" tabindex="-1">Sites &amp; usage</h2><p class="panel-intro help">Focused usage includes subdomains and continues with Restrictions off. Pause a site for downtime to stop counting and pause its waits, locks, and limits; saved settings stay editable. Today totals reset at local midnight. Content rules and the manual cooldown are independent.</p>
+        <h2 id="sites-title" tabindex="-1">Sites &amp; usage</h2><p class="panel-intro help">Focused usage includes subdomains and continues with Site restrictions off. Pause a site for downtime to stop counting and pause its waits, locks, and limits; saved settings stay editable. Today totals reset at local midnight. Content blocking and the manual cooldown are independent.</p>
         <div id="site-list" class="site-list" tabindex="-1"></div>
-        <section class="section" aria-labelledby="add-site-title"><h3 id="add-site-title">Track a site</h3><form id="add-site-form" class="stack"><div class="field"><label for="site-input">Domain or website address</label><input type="text" id="site-input" placeholder="example.com" autocomplete="off" required data-setting aria-describedby="site-input-help"><p id="site-input-help" class="help">For example, youtube.com. Subdomains are included.</p></div><label class="check-label"><input type="checkbox" id="add-site-wait" checked data-setting><span>Require site wait for this new site</span></label><div class="action-row"><button type="submit" id="add-site-btn" class="primary" data-setting>Track site…</button></div></form></section>
+        <section class="section" aria-labelledby="add-site-title"><h3 id="add-site-title">Track a site</h3><form id="add-site-form" class="stack"><div class="field"><label for="site-input">Domain or website address</label><input type="text" id="site-input" placeholder="example.com" autocomplete="off" required data-setting aria-describedby="site-input-help"><p id="site-input-help" class="help">For example, youtube.com. Subdomains are included. Add to your draft, then Save changes to start tracking.</p></div><label class="check-label"><input type="checkbox" id="add-site-wait" checked data-setting><span>Require site wait for this new site</span></label><div class="action-row"><button type="submit" id="add-site-btn" class="primary" data-setting>Add to draft</button></div></form></section>
       </section>
       <section id="youtube" class="settings-panel platform-panel" aria-labelledby="youtube-title" hidden><h2 id="youtube-title" tabindex="-1">YouTube</h2><div class="platform-content"></div></section>
       <section id="instagram" class="settings-panel platform-panel" aria-labelledby="instagram-title" hidden><h2 id="instagram-title" tabindex="-1">Instagram</h2><div class="platform-content"></div></section>

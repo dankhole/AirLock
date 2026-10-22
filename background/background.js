@@ -9,6 +9,7 @@ let pendingAlarmCleared = false;
 const progressCursors = new Map();
 const DEFAULT_CONFIG = {
   enabled: true,
+  contentControlsEnabled: true,
   sites: [],
   siteWaitEnabled: {},
   siteTrackingEnabled: {},
@@ -87,6 +88,7 @@ async function reconcileStartupState() {
 async function migrateStoredConfig() {
   const existing = await browser.storage.local.get([
     "enabled",
+    "contentControlsEnabled",
     "sites",
     "siteTrackingEnabled",
     "delayMinutes",
@@ -118,6 +120,7 @@ async function migrateStoredConfig() {
   }
 
   if (existing.enabled === undefined) updates.enabled = DEFAULT_CONFIG.enabled;
+  if (typeof existing.contentControlsEnabled !== "boolean") updates.contentControlsEnabled = existing.enabled !== false;
   if (existing.sites === undefined) updates.sites = DEFAULT_CONFIG.sites;
 
   const delayMinutes = clampDelayMinutes(existing.delayMinutes || DEFAULT_CONFIG.delayMinutes);
@@ -221,6 +224,7 @@ async function migrateStoredConfig() {
 async function readConfig() {
   const result = await browser.storage.local.get([
     "enabled",
+    "contentControlsEnabled",
     "sites",
     "siteWaitEnabled",
     "siteTrackingEnabled",
@@ -239,6 +243,7 @@ async function readConfig() {
   const delayMinutes = clampDelayMinutes(result.delayMinutes || DEFAULT_CONFIG.delayMinutes);
   return {
     enabled: result.enabled !== false,
+    contentControlsEnabled: typeof result.contentControlsEnabled === "boolean" ? result.contentControlsEnabled : result.enabled !== false,
     sites: result.sites || [],
     siteWaitEnabled: normalizeSiteWaitEnabled(result.siteWaitEnabled, result.sites || []),
     siteTrackingEnabled: normalizeSiteTrackingEnabled(result.siteTrackingEnabled, result.sites || []),
@@ -900,10 +905,17 @@ async function readPendingConfigChange() {
   const result = await browser.storage.local.get(PENDING_CONFIG_CHANGE_KEY);
   const pending = result[PENDING_CONFIG_CHANGE_KEY];
   if (!isPlainMap(pending)) return null;
-  // Existing holds predate per-site pauses. Their original configuration has
-  // tracking enabled everywhere, matching the new empty-map default.
-  if (isPlainMap(pending.baseConfig) && pending.baseConfig.siteTrackingEnabled === undefined) {
-    return { ...pending, baseConfig: { ...pending.baseConfig, siteTrackingEnabled: {} } };
+  // Normalize older fingerprints without changing their effective restrictions
+  // or granting engagement time. An old master-switch request affected both.
+  if (isPlainMap(pending.baseConfig)) {
+    const baseConfig = { ...pending.baseConfig };
+    let patch = pending.patch;
+    if (baseConfig.siteTrackingEnabled === undefined) baseConfig.siteTrackingEnabled = {};
+    if (baseConfig.contentControlsEnabled === undefined) {
+      baseConfig.contentControlsEnabled = baseConfig.enabled !== false;
+      if (isPlainMap(patch) && typeof patch.enabled === "boolean") patch = { ...patch, contentControlsEnabled: patch.enabled };
+    }
+    return { ...pending, baseConfig, ...(patch ? { patch } : {}) };
   }
   return pending;
 }
@@ -943,7 +955,7 @@ function getPendingRemainingMs(pending) {
 function legacyChangePatch(change, config) {
   const site = normalizeSite(change.site);
   switch (change.type) {
-    case "disableAirlock": return { enabled: false };
+    case "disableAirlock": return { enabled: false, contentControlsEnabled: false };
     case "disableMovingTarget": return { movingTargetEnabled: false };
     case "disableSiteWait": return site && config.sites.includes(site) ? { siteWaitEnabled: { [site]: false } } : null;
     case "removeSite": return site && config.sites.includes(site) ? { sites: config.sites.filter((entry) => entry !== site) } : null;
@@ -963,7 +975,7 @@ function validateConfigPatch(config, patch) {
   const allowed = Object.keys(DEFAULT_CONFIG);
   if (Object.keys(patch).some((key) => !allowed.includes(key))) return { reason: "unknown-setting" };
   const next = { ...config, siteTrackingEnabled: { ...config.siteTrackingEnabled }, siteWaitEnabled: { ...config.siteWaitEnabled }, dailyLimits: { ...config.dailyLimits }, dailyLimitPolicies: { ...config.dailyLimitPolicies } };
-  const booleans = ["enabled", "movingTargetEnabled", "dailyLockEnabled"];
+  const booleans = ["enabled", "contentControlsEnabled", "movingTargetEnabled", "dailyLockEnabled"];
   for (const key of booleans) {
     if (patch[key] === undefined) continue;
     if (typeof patch[key] !== "boolean") return { reason: "invalid-" + key };
@@ -1022,7 +1034,7 @@ function validateConfigPatch(config, patch) {
 }
 
 function isConfigWeaker(config, next, patch) {
-  if ((config.enabled && !next.enabled) || (config.movingTargetEnabled && !next.movingTargetEnabled) ||
+  if ((config.enabled && !next.enabled) || (config.contentControlsEnabled && !next.contentControlsEnabled) || (config.movingTargetEnabled && !next.movingTargetEnabled) ||
       next.delayMinutes < config.delayMinutes || next.settingsDelayMinutes < config.settingsDelayMinutes ||
       (config.cooldownUntil && !next.cooldownUntil) || (config.dailyLockEnabled && !next.dailyLockEnabled) ||
       config.sites.some((site) => !next.sites.includes(site))) return true;

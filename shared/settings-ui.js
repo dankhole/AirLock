@@ -4,9 +4,10 @@
   root.AirlockSettingsUI = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
-  const MASTER_HELP = "Turning restrictions off pauses site waits, scheduled locks, daily-limit enforcement, and content rules. Usage tracking continues; an active manual cooldown remains in effect.";
+  const MASTER_HELP = "Turning Site restrictions off pauses site waits, scheduled locks, and daily-limit enforcement. Usage tracking continues. Content blocking stays independent, and an active manual cooldown remains in effect.";
+  const CONTENT_HELP = "Turning Content blocking off pauses saved Shorts, Reels, and other content rules. Turn it back on to restore them. Site waits, schedules, limits, usage tracking, and manual cooldown stay independent.";
   const labels = {
-    enabled: "Restrictions", delayMinutes: "Site wait minutes", settingsDelayMinutes: "Settings hold minutes",
+    enabled: "Site restrictions", contentControlsEnabled: "Content blocking", delayMinutes: "Site wait minutes", settingsDelayMinutes: "Settings hold minutes",
     movingTargetEnabled: "Moving target", dailyLockEnabled: "Daily lock", dailyLockStart: "Daily lock starts",
     dailyLockEnd: "Daily lock ends", cooldownUntil: "Manual cooldown", sites: "Tracked sites",
     siteWaitEnabled: "Site wait", siteTrackingEnabled: "Site tracking", dailyLimits: "Daily limit", dailyLimitPolicies: "Reached-limit action"
@@ -273,18 +274,18 @@
         doc.getElementById("confirm-dialog-cancel").focus();
       });
     }
-    async function change(patch, title = "Confirm settings change", extra = []) {
+    async function change(patch, title = "Confirm settings change", extra = [], changeOptions = {}) {
       const snapshot = client.snapshot;
       if (busy || !snapshot || snapshot.pending) return false;
-      const differences = describePatch(snapshot.config, patch, catalog);
+      const differences = describePatch(changeOptions.baseConfig || snapshot.config, patch, catalog);
       if (!differences.length) { message("These settings already match the requested change."); return false; }
-      if (!(await confirm(title, differences.concat(extra)))) return false;
+      if (!(await confirm(title, differences.concat(extra), changeOptions.confirmLabel))) return false;
       const invoker = previousFocus;
       busy = true; lock();
       try {
-        const result = await client.request(patch, snapshot.revision);
+        const result = await client.request(patch, changeOptions.expectedRevision === undefined ? snapshot.revision : changeOptions.expectedRevision);
         if (result.ok === false) { message(errorMessage(result.reason), true); return false; }
-        message(result.pending ? "Change pending. Current restrictions stay active until the hold finishes." : "Settings updated.");
+        message(result.pending ? "Change pending. Current settings stay active until the hold finishes." : "Settings updated.");
         if (result.pending) { pendingInvoker = previousFocus; pendingTarget.focus(); }
         return true;
       } catch (error) { message(error.message, true); return false; }
@@ -299,7 +300,7 @@
       if (Number(config.cooldownUntil) > Date.now()) {
         return change({ cooldownUntil: null }, "End cooldown early?", ["Tracked sites become available under their other configured restrictions after the settings hold."]);
       }
-      if (!(await confirm("Start a 1-hour cooldown?", ["All tracked sites will be blocked for one hour, including while Restrictions is off."], "Start cooldown"))) return;
+      if (!(await confirm("Start a 1-hour cooldown?", ["All tracked sites will be blocked for one hour, including while Site restrictions is off."], "Start cooldown"))) return;
       const invoker = previousFocus;
       busy = true; lock();
       try {
@@ -315,7 +316,7 @@
       const active = Number(config.cooldownUntil) > Date.now();
       const copy = doc.getElementById("cooldown-status");
       const button = doc.getElementById("cooldown-btn");
-      if (copy) copy.textContent = active ? "Tracked sites blocked until " + formatClock(config.cooldownUntil) + ". Applies with Restrictions off." : "Block all tracked sites for one hour.";
+      if (copy) copy.textContent = active ? "Tracked sites blocked until " + formatClock(config.cooldownUntil) + ". Applies with Site restrictions off." : "Block all tracked sites for one hour.";
       if (button) button.textContent = active ? "End early…" : "Start 1-hour cooldown";
     }
     const cooldownButton = doc.getElementById("cooldown-btn");
@@ -330,14 +331,14 @@
     if (!platform) return "This site has no platform content controls.";
     const items = catalog.filter((item) => item.platform === platform && config.contentControls[platform][item.key] !== item.default);
     if (!items.length) return "None configured";
-    return (config.enabled === false ? "Paused by Restrictions · " : "Configured · ") + items.map((item) => item.label).join(", ");
+    return (config.contentControlsEnabled === false ? "Paused by Content blocking · " : "Configured · ") + items.map((item) => item.label).join(", ");
   }
   function accessSummary(state, config) {
     if (!state) return "Current access status is unavailable. Open Site settings to review the configured rules.";
     if (state.reason === "untracked") return "Not tracked · no Airlock site gate";
     if (state.reason === "cooldown") return "Manual cooldown until " + formatClock(state.unlockAt);
     if (state.reason === "paused") return "Tracking paused · site restrictions paused";
-    if (state.reason === "disabled") return "Restrictions off · usage tracking continues";
+    if (state.reason === "disabled") return "Site restrictions off · usage tracking continues";
     if (state.reason === "daily-lock") return "Daily lock until " + formatClock(state.unlockAt);
     if (state.reason === "daily-limit") {
       return state.dailyLimitMode === "cooldown" ? "Daily-limit cooldown · allowance resets at " + formatClock(state.resetAt) : "Daily limit reached · resets at " + formatClock(state.resetAt);
@@ -345,5 +346,5 @@
     if (state.reason === "wait") return "Site wait " + formatCountdown(state.remainingMs) + (state.paused ? " · paused while page is unfocused" : " remaining");
     return config.siteWaitEnabled && config.siteWaitEnabled[state.site] === false ? "Available · usage tracked without a site wait" : "Available";
   }
-  return { MASTER_HELP, formatDuration, formatCountdown, formatClock, cleanDomain, describePatch, errorMessage, createHold, createController, appendTrackingPatch, rulesSummary, accessSummary };
+  return { MASTER_HELP, CONTENT_HELP, formatDuration, formatCountdown, formatClock, cleanDomain, describePatch, errorMessage, createHold, createController, appendTrackingPatch, rulesSummary, accessSummary };
 });

@@ -6,7 +6,7 @@ A desktop Chrome and Firefox Manifest V3 extension for managing distracting webs
 
 Airlock combines local focused-time monitoring, site-entry waits, daily budgets and scheduled locks with optional content controls for YouTube, Instagram and Facebook. The popup shows current-site status and quick actions; **Settings** opens the full configuration page.
 
-All new content controls start **off**. **Restrictions** must also be on for content filters to apply; turning it off preserves individual preferences but restores page content. Content controls work on their supported sites without adding those sites to the tracked list. Tracking and time restrictions still require adding a site. The optional presets change content controls only.
+All new content controls start **off**. **Content blocking** independently pauses and restores all saved content rules, including Shorts and Reels. **Site restrictions** controls waits, schedules, and daily limits; either switch can stay on while the other is off. Content controls work on their supported sites without adding those sites to the tracked list. Tracking and time restrictions still require adding a site. The optional presets change content controls only.
 
 | Site | Content controls |
 |---|---|
@@ -25,14 +25,16 @@ Converting a YouTube Short to the normal player still permits watching that vide
 - Focused usage is aggregated for each tracked site, including matching subdomains, and resets at local midnight. Waiting, blocked and pending-redirect time is excluded. Ordinary browsing with content hidden still counts.
 - Turn **Site wait** off for a tracked site to retain monitoring and other restrictions without an entry countdown. Existing sites keep their wait setting.
 - Use **Pause** beside a site, or **Pause tracking** in the popup, for downtime. Usage counting and that site's waits, locks, and limits pause; settings, totals, and existing wait progress remain saved. **Resume** restores them without counting the paused time. Independent content controls and the global manual cooldown still apply.
-- The main Restrictions switch disables content controls, entry waits, scheduled locks and daily-limit enforcement. Usage monitoring continues on tracked sites. An active manually started one-hour cooldown remains enforced.
+- The **Site restrictions** switch disables entry waits, scheduled locks and daily-limit enforcement. The separate **Content blocking** switch disables content rules while preserving their saved preferences. Usage monitoring continues on tracked sites. An active manually started one-hour cooldown remains enforced.
 - Daily locks support same-day and overnight local-time windows. Daily limits support a block until midnight or a per-site break. A break blocks only that site when it exhausts its allowance, then renews the allowance; today's usage total stays recorded. Limit actions and break durations can be edited and saved without an active limit, and changing the duration does not turn on the break action. The manual cooldown and focused-use check-in block all tracked sites for one hour.
 
 Domain matching is bounded: `reddit.com` includes `www.reddit.com` and `old.reddit.com`, not `notreddit.com`.
 
 ### Changing settings
 
-Settings changes are confirmed in the UI and validated by the background controller. Stronger changes apply immediately after confirmation. Weaker changes require the configured **Settings hold**; examples include turning a restriction off, increasing a daily allowance, ending a cooldown early, or removing locked time from a schedule. The hold can be set from 0 to 600 minutes; at 0, all changes apply immediately after confirmation. Reducing the hold uses its current duration. A change that mixes stronger and weaker settings applies atomically after any required hold.
+On the full settings page, edit multiple settings across panels, then choose **Save changes** to review and submit the entire batch. **Discard** restores the saved settings. Drafts belong to the open page and do not affect active restrictions. Closing or reloading it drops unsaved edits. The **Site restrictions** and **Content blocking** switches and manual cooldown remain separate confirmed actions, as do popup quick actions. Turning either switch off still requires its own Settings hold when the hold is nonzero.
+
+Saved changes are validated by the background controller. Stronger changes apply immediately after confirmation. Weaker changes require the configured **Settings hold**; examples include turning a restriction off, increasing a daily allowance, ending a cooldown early, or removing locked time from a schedule. The hold can be set from 0 to 600 minutes; at 0, all changes apply immediately after confirmation. Reducing the hold uses its current duration. A change that mixes stronger and weaker settings applies atomically after any required hold.
 
 The popup and settings page share one authoritative pending change. A hold advances only while its target is engaged in a focused, visible view, and pauses on release, blur or closing the view. Only one view can advance it at a time. The remaining hold survives reopening the UI. Concurrent settings edits are revision-checked to prevent one view silently overwriting another.
 
@@ -116,14 +118,21 @@ npm run test:browser
 
 Firefox defaults to `/Applications/Firefox.app/Contents/MacOS/firefox`; set `AIRLOCK_FIREFOX_BINARY` for another installation. The pinned geckodriver is downloaded to a temporary cache on first use, which requires network access. To test the packaged Firefox ZIP, set `AIRLOCK_FIREFOX_ADDON` to its absolute path. The fixture proxy uses local `openssl` to create a temporary certificate and serves controlled pages at supported site origins without contacting those sites. Screenshots are written under `store/test-artifacts/`.
 
-### Integration and usability validation — 2026-10-21
+### Integration and usability validation — 2026-10-22
+
+Airlock 1.1.2 follow-up:
+
+- Settings edits now stay in a local draft until Save changes. Tests cover batch confirmation, atomic holds, discard, invalid fields, stale revisions, and independent switch actions.
+- Site restrictions and Content blocking have separate guarded switches. Upgrade checks preserve saved rules, paused state, and existing pending holds.
+- All 219 Node tests and 129 popup layout states passed. The popup fits 300/360/400 × 600 pixels, with a maximum content height of 593.72 pixels.
+- Final v1.1.2 builds passed actual extension integration in Chromium 153 and packaged Firefox 158 against controlled HTTPS fixtures, including a real 60-second batch hold, independent filtering/site waits, restored rules, and core-gate priority. Firefox package lint reported zero errors, notices, or warnings. These fixture checks do not establish authenticated live-site compatibility.
 
 Airlock 1.1.1 follow-up:
 
 - The popup uses compact quick actions, visible content-rule status, expandable details, and diagnostics for missing/failed page scripts. An authored-UI check with mocked browser authority passed 117 rendered states at 300/360/400 × 600 pixels; maximum content height was 572.8 pixels, with no page overflow and the hold/global actions visible. This does not remove the native Firefox WebDriver limitation described below. Run `node scripts/popup-layout-check.js` after UI changes.
 - All 204 Node tests passed. Added coverage includes inactive policy persistence, editing break duration without switching actions, per-site Pause/Resume, settings-hold upgrade compatibility, authoritative usage ordering, missing startup responses and recovery without usage backfill, additional Shorts/Reels structures, and retrying failed content-settings reads.
 - Actual temporary-extension integration passed in Chromium 153 and packaged Firefox 158 using synthetic HTTPS site origins. Checks cover the real settings hold, reversible filters and routes, core-gate priority, inactive preference editing, Pause/Resume with real foreground downtime and no usage backfill, retained waits, and independent content rules/manual cooldown. UI checks cover keyboard dialogs/focus, narrow layouts, and 200% root text; Chromium also passed forced-colors and reduced-motion emulation. Final test-harness changes wait for panel navigation and capture real content sender IDs without expanding extension permissions. Firefox package lint reported no errors, notices, or warnings.
-- Expanded YouTube/Facebook matching follows the relevant donor patterns and preserves ordinary/mixed content in regression fixtures. Instagram's reported `/reels/DcPL-RdxD7v/` route already redirects in an enabled, allowed-core runtime test; that test does not establish why it remained visible in the reported authenticated session. Controls default off, so inspect the individual platform controls and Restrictions state. Existing tabs may need reloading after installing/updating the extension. Authenticated site compatibility remains unverified.
+- Expanded YouTube/Facebook matching follows the relevant donor patterns and preserves ordinary/mixed content in regression fixtures. Instagram's reported `/reels/DcPL-RdxD7v/` route already redirects in an enabled, allowed-core runtime test; that test does not establish why it remained visible in the reported authenticated session. Controls default off, so inspect the individual platform controls and Content blocking state. Existing tabs may need reloading after installing/updating the extension. Authenticated site compatibility remains unverified.
 
 The combined implementation from `distraction-blocker/AirLock` is integrated into this repository, including source, tests, options UI, packaging and license notices. Existing settings are retained and new content controls default off.
 
@@ -163,13 +172,21 @@ The original workspace’s unsigned Firefox package was `store/firefox-addon-1.0
 - Hold Space/Enter or use touch on the target; releasing, switching views or losing focus must pause it
 - Open popup and settings together; the same pending change must not advance twice as fast
 
+### Batched settings
+- Edit settings on several panels; verify no confirmation or hold starts and active restrictions stay unchanged
+- Choose **Save changes**, review the combined differences, and verify one hold applies the complete batch if any setting is weaker
+- Cancel the review and verify the draft remains editable; choose **Discard** to restore saved values
+- With unsaved edits present, turn Site restrictions or Content blocking off; verify its independent confirmation and hold do not submit the draft
+- Edit settings in another view; verify the draft requires review against the latest settings before saving
+
 ### Content controls
 - Start with all new controls off and check normal site content remains visible
 - Enable one rule, check a matching element is hidden, then disable it and verify the element returns
 - Check dynamically inserted content and same-document navigation without refreshing
 - Verify ordinary videos/posts, mixed YouTube shelves, messages, intentional Search and account access survive
 - Open a direct blocked route while a site wait or hard lock is active; navigation must wait until Airlock allows access
-- Turn Restrictions off and verify content is restored, while tracked-site usage and an active manual cooldown retain their documented behavior
+- Turn Site restrictions off and verify content rules stay active; turn Content blocking off and verify content is restored without changing site waits, limits, or schedules
+- Turn Content blocking back on and verify saved rules resume, including while Site restrictions is off
 - Test selected controls against your logged-in site layouts; record any unrecognized surfaces rather than assuming fixture coverage proves live coverage
 
 ### Daily lock
