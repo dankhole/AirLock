@@ -67,6 +67,25 @@ test('localized Reel headings are exact and unrelated labels or mentions remain 
   assert.deepEqual(scan(context, { hideReels: true }), []);
 });
 
+test('donor-backed span headings require a bounded tray with multiple Reel destinations', () => {
+  // The donor scans exact Reels spans. Repeated Reel cards provide the extra
+  // structural evidence needed to collapse a tray rather than an ordinary post.
+  const context = fixture(`<div role="feed">
+    <div data-pagelet="FeedUnit_1" id="span-tray"><div><span>Reels</span></div><a href="/reel/123"><img></a><a href="/reel/456"><img></a></div>
+    <div role="article" id="shared-post"><span>Reels</span><p>My friend shared these videos</p><a id="shared-one" href="/reel/123">One</a><a id="shared-two" href="/reel/456">Two</a></div>
+    <div role="article" id="single-post"><span>Reels</span><a id="single-link" href="/reel/123">Watch</a></div>
+    <div role="article" id="duplicate-post"><span>Reels</span><a id="duplicate-one" href="/reel/123">Watch</a><a id="duplicate-two" href="/reel/123">Watch again</a></div>
+    <div role="article" id="span-caption-post"><span>Reels</span><div><span>My ordinary post about these videos</span></div><a href="/reel/123"><img></a><a href="/reel/456"><img></a></div>
+  </div>`);
+  const matches = ids(scan(context, {hideReels: true}));
+  assert(matches.includes('span-tray'));
+  for (const id of ['shared-post', 'single-post', 'duplicate-post', 'span-caption-post']) assert(!matches.includes(id), id);
+  const label = context.document.querySelector('#span-tray span');
+  assert(ids(scan(context, {hideReels: true}, label)).includes('span-tray'));
+  label.textContent = 'Videos';
+  assert(!ids(scan(context, {hideReels: true}, label)).includes('span-tray'));
+});
+
 test('a shared Reel URL never hides an ordinary list-backed article or message', () => {
   const context = fixture(`<ul><li id="ordinary-post"><article><p>Ordinary post text</p><a id="shared" href="/reel/123">Shared Reel</a><p>More text</p></article></li>
     <li id="message"><div>Here is something I found <a id="message-link" href="/reel/456">video</a> yesterday</div></li>

@@ -58,7 +58,7 @@
   }
   let bootstrapRevision = 0;
   listenBrowser(browser.storage.onChanged, (changes, areaName) => {
-    if (areaName === "local" && ["configRevision", "enabled", "sites", "movingTargetEnabled", "cooldownUntil", "dailyLockEnabled", "dailyLockStart", "dailyLockEnd", "dailyLimitMinutes", "siteDailyLimits", "siteWaitEnabled"].some((key) => key in changes)) {
+    if (areaName === "local" && ["configRevision", "enabled", "sites", "movingTargetEnabled", "cooldownUntil", "dailyLockEnabled", "dailyLockStart", "dailyLockEnd", "dailyLimitMinutes", "siteDailyLimits", "siteWaitEnabled", "siteTrackingEnabled"].some((key) => key in changes)) {
       bootstrapRevision += 1;
     }
   });
@@ -149,7 +149,7 @@
   let dailyUsageInterval = null;
   let dailyUsageTickAt = null;
   let dailyUsageUpdateInFlight = false;
-  let dailyUsageTrackingEnabled = initiallyTracked;
+  let dailyUsageTrackingEnabled = Boolean(initiallyTracked && response && response.trackingEnabled !== false);
   let activeStateRefreshInFlight = false;
   let configRecheckInFlight = false;
   let configRecheckPending = false;
@@ -1358,6 +1358,9 @@
       throw new Error("Core gate response unavailable");
     }
     coreConfigAuthoritative = true;
+    dailyUsageTrackingEnabled = nextResponse.trackingEnabled !== false && nextResponse.tracked !== false;
+    if (!dailyUsageTrackingEnabled) { stopDailyUsageTracking(); dismissUsageReminder(); }
+    if (typeof nextResponse.active === "boolean") setBackgroundActive(nextResponse.active);
     if (nextResponse && nextResponse.type === "SHOW_COOLDOWN") {
       showCooldown(nextResponse.unlockAt);
       return;
@@ -1508,7 +1511,8 @@
       syncMovingTargetAnimation();
     }
 
-    if (areaName === "local" && changes.enabled) {
+    if (areaName === "local" && (changes.enabled || changes.siteTrackingEnabled)) {
+      stopDailyUsageTracking();
       recheckConfig();
     }
 

@@ -6,7 +6,7 @@ A desktop Chrome and Firefox Manifest V3 extension for managing distracting webs
 
 Airlock combines local focused-time monitoring, site-entry waits, daily budgets and scheduled locks with optional content controls for YouTube, Instagram and Facebook. The popup shows current-site status and quick actions; **Settings** opens the full configuration page.
 
-All new content controls start **off**. They work on their supported sites without adding those sites to the tracked list. Tracking and time restrictions still require adding a site. The optional presets change content controls only.
+All new content controls start **off**. **Restrictions** must also be on for content filters to apply; turning it off preserves individual preferences but restores page content. Content controls work on their supported sites without adding those sites to the tracked list. Tracking and time restrictions still require adding a site. The optional presets change content controls only.
 
 | Site | Content controls |
 |---|---|
@@ -24,8 +24,9 @@ Converting a YouTube Short to the normal player still permits watching that vide
 - Refreshing resumes the existing wait. The overlay's Continue action becomes available only after the wait finishes. Daily locks, exhausted hard daily limits and active cooldowns cannot be dismissed through Continue.
 - Focused usage is aggregated for each tracked site, including matching subdomains, and resets at local midnight. Waiting, blocked and pending-redirect time is excluded. Ordinary browsing with content hidden still counts.
 - Turn **Site wait** off for a tracked site to retain monitoring and other restrictions without an entry countdown. Existing sites keep their wait setting.
+- Use **Pause** beside a site, or **Pause tracking** in the popup, for downtime. Usage counting and that site's waits, locks, and limits pause; settings, totals, and existing wait progress remain saved. **Resume** restores them without counting the paused time. Independent content controls and the global manual cooldown still apply.
 - The main Restrictions switch disables content controls, entry waits, scheduled locks and daily-limit enforcement. Usage monitoring continues on tracked sites. An active manually started one-hour cooldown remains enforced.
-- Daily locks support same-day and overnight local-time windows. Daily limits support hard blocks or a per-site cooldown. The existing focused-use check-in can start a one-hour cooldown for all tracked sites.
+- Daily locks support same-day and overnight local-time windows. Daily limits support a block until midnight or a per-site break. A break blocks only that site when it exhausts its allowance, then renews the allowance; today's usage total stays recorded. Limit actions and break durations can be edited and saved without an active limit, and changing the duration does not turn on the break action. The manual cooldown and focused-use check-in block all tracked sites for one hour.
 
 Domain matching is bounded: `reddit.com` includes `www.reddit.com` and `old.reddit.com`, not `notreddit.com`.
 
@@ -116,6 +117,13 @@ npm run test:browser
 Firefox defaults to `/Applications/Firefox.app/Contents/MacOS/firefox`; set `AIRLOCK_FIREFOX_BINARY` for another installation. The pinned geckodriver is downloaded to a temporary cache on first use, which requires network access. To test the packaged Firefox ZIP, set `AIRLOCK_FIREFOX_ADDON` to its absolute path. The fixture proxy uses local `openssl` to create a temporary certificate and serves controlled pages at supported site origins without contacting those sites. Screenshots are written under `store/test-artifacts/`.
 
 ### Integration and usability validation — 2026-10-21
+
+Airlock 1.1.1 follow-up:
+
+- The popup uses compact quick actions, visible content-rule status, expandable details, and diagnostics for missing/failed page scripts. An authored-UI check with mocked browser authority passed 117 rendered states at 300/360/400 × 600 pixels; maximum content height was 572.8 pixels, with no page overflow and the hold/global actions visible. This does not remove the native Firefox WebDriver limitation described below. Run `node scripts/popup-layout-check.js` after UI changes.
+- All 204 Node tests passed. Added coverage includes inactive policy persistence, editing break duration without switching actions, per-site Pause/Resume, settings-hold upgrade compatibility, authoritative usage ordering, missing startup responses and recovery without usage backfill, additional Shorts/Reels structures, and retrying failed content-settings reads.
+- Actual temporary-extension integration passed in Chromium 153 and packaged Firefox 158 using synthetic HTTPS site origins. Checks cover the real settings hold, reversible filters and routes, core-gate priority, inactive preference editing, Pause/Resume with real foreground downtime and no usage backfill, retained waits, and independent content rules/manual cooldown. UI checks cover keyboard dialogs/focus, narrow layouts, and 200% root text; Chromium also passed forced-colors and reduced-motion emulation. Final test-harness changes wait for panel navigation and capture real content sender IDs without expanding extension permissions. Firefox package lint reported no errors, notices, or warnings.
+- Expanded YouTube/Facebook matching follows the relevant donor patterns and preserves ordinary/mixed content in regression fixtures. Instagram's reported `/reels/DcPL-RdxD7v/` route already redirects in an enabled, allowed-core runtime test; that test does not establish why it remained visible in the reported authenticated session. Controls default off, so inspect the individual platform controls and Restrictions state. Existing tabs may need reloading after installing/updating the extension. Authenticated site compatibility remains unverified.
 
 The combined implementation from `distraction-blocker/AirLock` is integrated into this repository, including source, tests, options UI, packaging and license notices. Existing settings are retained and new content controls default off.
 

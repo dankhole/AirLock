@@ -91,6 +91,25 @@ test('mixed generic shelves retain ordinary video siblings while hiding positive
   assert.deepEqual(ids(scan(context, { hideShorts: true })), ['short', 'short-grid']);
 });
 
+test('donor-backed Shorts heading, badge and individual sidebar routes retain conservative boundaries', () => {
+  // These are reduced reproductions of the donor's richShelf/channel/title-link
+  // selectors, not captures of an authenticated current YouTube document.
+  const context = fixture(`
+    <ytd-rich-shelf-renderer id="heading-shelf"><h2><yt-icon></yt-icon>Shorts</h2><div><a href="/shorts/Abc_12-dEf3">Short</a></div></ytd-rich-shelf-renderer>
+    <ytd-rich-shelf-renderer id="ordinary-heading"><h2><yt-icon></yt-icon>Music</h2></ytd-rich-shelf-renderer>
+    <ytd-rich-shelf-renderer id="mixed-heading"><h2><yt-icon></yt-icon>Shorts</h2><a href="/watch?v=Abc_12-dEf3">Normal video</a></ytd-rich-shelf-renderer>
+    <ytd-rich-item-renderer id="badge-card"><span aria-label="Shorts"></span></ytd-rich-item-renderer>
+    <ytd-rich-item-renderer id="watch-url-badge-card"><span aria-label="Shorts"></span><ytd-thumbnail><a href="/watch?v=Abc_12-dEf3">A Short with a watch URL</a></ytd-thumbnail></ytd-rich-item-renderer>
+    <ytd-rich-item-renderer id="ordinary-badge"><span aria-label="Shorts highlights"></span><ytd-thumbnail><a href="/watch?v=Abc_12-dEf3">Normal video</a></ytd-thumbnail></ytd-rich-item-renderer>
+    <ytd-rich-item-renderer id="mixed-outer"><ytd-rich-shelf-renderer id="nested-mixed"><h2><yt-icon></yt-icon>Shorts</h2><ytd-rich-item-renderer id="nested-short"><span aria-label="Shorts"></span></ytd-rich-item-renderer><ytd-video-renderer><ytd-thumbnail><a href="/watch?v=Abc_12-dEf3">Normal sibling</a></ytd-thumbnail></ytd-video-renderer></ytd-rich-shelf-renderer></ytd-rich-item-renderer>
+    <ytd-guide-entry-renderer id="individual-nav"><a href="/shorts/Abc_12-dEf3" title="Shorts">Shorts</a></ytd-guide-entry-renderer>
+    <nav><a id="title-nav" href="/shorts/Abc_12-dEf3" title="Shorts">Shorts</a><a id="external-nav" href="https://example.com/shorts/Abc_12-dEf3" title="Shorts">Shorts</a></nav>
+    <a id="ordinary-title-link" href="/shorts/Abc_12-dEf3" title="Shorts">A post mentioning Shorts</a>
+  `);
+  assert.deepEqual(ids(scan(context, {hideShorts: true})), ['badge-card', 'heading-shelf', 'nested-short', 'watch-url-badge-card']);
+  assert.deepEqual(ids(scan(context, {hideNavigation: true})), ['individual-nav', 'title-nav']);
+});
+
 test('affected roots, repeated scans and reused thumbnail URLs have fresh classifications', () => {
   const context = fixture('<section><ytd-video-renderer id="card"><ytd-thumbnail><a href="/shorts/Abc_12-dEf3"></a></ytd-thumbnail></ytd-video-renderer><ytd-video-renderer id="normal"><ytd-thumbnail><a href="/watch?v=Abc_12-dEf3"></a></ytd-thumbnail></ytd-video-renderer></section>');
   const anchor = context.document.querySelector('#card a');

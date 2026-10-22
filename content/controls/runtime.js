@@ -15,6 +15,7 @@
   const HIDDEN_ATTRIBUTE = "data-airlock-hidden";
   const SUBDUED_ATTRIBUTE = "data-airlock-subdued";
   const NAVIGATION_RECOVERY_MS = 4000;
+  const SETTINGS_RETRY_MS = 5000;
 
   function createRuntime(env) {
     const { window, document, browser, controlsApi, pageState } = env;
@@ -35,6 +36,7 @@
     let observer = null;
     let style = null;
     let scheduled = null;
+    let settingsRetryTimer = null;
     let navigationTimer = null;
     let navigation = null;
     let attemptedNavigation = null;
@@ -81,6 +83,11 @@
       scheduled = null;
       dirtyRoots.clear();
       fullPass = false;
+    }
+
+    function cancelSettingsRetry() {
+      if (settingsRetryTimer !== null) clearTimer(settingsRetryTimer);
+      settingsRetryTimer = null;
     }
 
     function ownedNode(node) {
@@ -345,7 +352,8 @@
     }
 
     async function readSettings() {
-      if (!supported || disposed) return;
+      if (!supported || disposed || pageHidden) return;
+      cancelSettingsRetry();
       const sequence = ++readSequence;
       try {
         const saved = await browser.storage.local.get(["enabled", "contentControls", "configRevision"]);
@@ -358,9 +366,15 @@
         attemptedNavigation = null;
         activate();
       } catch {
-        if (disposed || sequence !== readSequence) return;
+        if (disposed || pageHidden || sequence !== readSequence) return;
         // Do not apply guessed defaults before an authoritative read succeeds.
         if (!settings) activate();
+        // A transient storage failure must not leave this document unfiltered
+        // until its next navigation or unrelated settings event.
+        settingsRetryTimer = setTimer(() => {
+          settingsRetryTimer = null;
+          readSettings();
+        }, SETTINGS_RETRY_MS);
       }
     }
 
@@ -404,6 +418,7 @@
       disposed = true;
       generation += 1;
       readSequence += 1;
+      cancelSettingsRetry();
       cancelScheduled(); stopObserver(); clearEffects(); clearNavigation();
       for (const callback of cleanup.splice(0)) callback();
       adapters.clear();
@@ -430,6 +445,7 @@
         pageHidden = true;
         generation += 1;
         readSequence += 1;
+        cancelSettingsRetry();
         stopObserver(); cancelScheduled(); clearNavigation();
       });
       listen(document, "DOMContentLoaded", activate);

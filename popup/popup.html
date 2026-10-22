@@ -9,40 +9,38 @@
 </head>
 <body>
   <main class="popup">
-    <header class="popup-header"><h1>Airlock</h1><a id="settings-link" href="../options/options.html#general" target="_blank">Settings</a></header>
-    <label class="check-label"><input type="checkbox" id="enabled-toggle" data-setting aria-describedby="master-help"><strong>Restrictions</strong></label>
-    <p id="master-help" class="help"></p>
+    <header class="popup-header"><h1>Airlock</h1><a id="settings-link" href="../options/options.html#general" target="_blank">All settings ↗</a></header>
+    <label class="check-label restrictions-control"><span><strong>Restrictions</strong><span class="help">Waits, limits &amp; content rules</span></span><input type="checkbox" id="enabled-toggle" data-setting aria-describedby="master-help"></label>
+    <p id="master-help" class="visually-hidden"></p>
     <p id="ui-status" class="status-message" role="status" aria-live="polite">Loading settings…</p>
     <section id="pending-config-section" class="pending-change" aria-labelledby="pending-config-title" hidden>
-      <h2 id="pending-config-title">Settings change awaiting hold</h2>
-      <ul id="pending-config-differences"></ul>
-      <div id="pending-config-timer" class="pending-countdown" aria-label="Remaining hold time">0:00</div>
+      <div class="pending-heading"><h2 id="pending-config-title">Settings change awaiting hold</h2><div id="pending-config-timer" class="pending-countdown" aria-label="Remaining hold time">0:00</div></div>
+      <details class="pending-details" name="popup-details"><summary>Review changes</summary><ul id="pending-config-differences" tabindex="0" aria-label="Pending changes"></ul></details>
       <p id="pending-config-engagement" class="help" role="status">Paused · engage the target to count down</p>
-      <p class="help">Hover here or hold Space/Enter to count down. On touch, press and hold. Current restrictions stay in effect.</p>
-      <div class="action-row"><button type="button" id="pending-config-hover-target" class="hold-target">Hold to apply change</button><button type="button" id="pending-config-cancel">Cancel change</button></div>
+      <div class="action-row"><button type="button" id="pending-config-hover-target" class="hold-target" aria-describedby="hold-help">Hold to apply</button><button type="button" id="pending-config-cancel">Cancel</button></div>
+      <p id="hold-help" class="help">Hover or hold Space / Enter.</p>
     </section>
     <section class="current-site" aria-labelledby="current-site-title">
       <p class="eyebrow">Current site</p>
       <h2 id="current-site-title">Checking this tab…</h2>
       <dl class="site-status">
-        <div><dt>Site access</dt><dd id="current-access">Loading…</dd></div>
-        <div><dt>Today usage</dt><dd id="current-usage">Loading…</dd></div>
-        <div id="current-allowance-row" hidden><dt>Allowance</dt><dd id="current-allowance"></dd></div>
-        <div><dt>Content rules</dt><dd id="current-rules">Loading…</dd></div>
+        <div class="access-row"><dt class="visually-hidden">Site access</dt><dd id="current-access">Loading…</dd></div>
+        <div class="usage-row"><dt>Today</dt><dd id="current-usage">Loading…</dd></div>
       </dl>
-      <a id="site-settings-link" href="../options/options.html#sites" target="_blank">Site settings</a>
+      <p id="current-rules-status" class="rules-status">Content rules: checking…</p>
+      <details class="site-details" name="popup-details"><summary>Rule details &amp; allowance</summary><div class="site-details-content" tabindex="0" role="region" aria-label="Site rules and allowance">
+        <dl><div id="current-allowance-row" hidden><dt>Allowance</dt><dd id="current-allowance"></dd></div><div><dt>Content rules</dt><dd id="current-rules">Loading…</dd></div></dl>
+      </div></details>
+      <div class="site-actions"><a id="site-settings-link" href="../options/options.html#sites" target="_blank">Site settings ↗</a><button type="button" id="current-tracking-btn" data-setting hidden>Pause tracking</button></div>
     </section>
-    <section id="track-current-section" class="section" hidden>
+    <section id="track-current-section" class="track-current" hidden>
       <label class="check-label"><input type="checkbox" id="add-site-wait" data-setting checked><span>Require site wait</span></label>
-      <p class="help">Tracking records focused usage. Daily locks and limits are available with or without a site wait.</p>
-      <button type="button" id="add-current-btn" data-setting>Track this site</button>
+      <button type="button" id="add-current-btn" class="primary" data-setting>Track this site</button>
     </section>
-    <section class="section" aria-labelledby="cooldown-title">
-      <h2 id="cooldown-title">Manual cooldown</h2>
-      <p id="cooldown-status" class="help">Block all tracked sites for one hour.</p>
-      <button type="button" id="cooldown-btn" data-setting>Start 1-hour cooldown</button>
+    <section class="cooldown" aria-labelledby="cooldown-title">
+      <div class="cooldown-heading"><h2 id="cooldown-title">Global cooldown</h2><button type="button" id="cooldown-btn" data-setting>Start 1 hour</button></div>
+      <p id="cooldown-status" class="help">Blocks all tracked sites for 1 hour.</p>
     </section>
-    <footer><a href="../options/options.html#sites" target="_blank">Sites &amp; usage</a><span class="help">Local usage · resets at midnight</span></footer>
   </main>
   <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-message">
     <form method="dialog">

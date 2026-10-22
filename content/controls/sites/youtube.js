@@ -6,6 +6,7 @@
   const CARD = 'ytd-video-renderer,ytd-grid-video-renderer,ytd-rich-item-renderer,ytm-video-with-context-renderer,yt-lockup-view-model,ytd-reel-item-renderer,ytm-reel-item-renderer,ytm-shorts-lockup-view-model,yt-shorts-lockup-view-model,shorts-lockup-view-model';
   const SHELF = 'ytd-reel-shelf-renderer,ytm-reel-shelf-renderer,ytd-rich-shelf-renderer,grid-shelf-view-model';
   const NAV = 'ytd-guide-entry-renderer,ytd-mini-guide-entry-renderer,ytm-pivot-bar-item-renderer,yt-tab-shape,ytm-tab-renderer,tp-yt-paper-tab';
+  const NAV_TITLE = 'a[title="Shorts"],a[title="ショート"]';
   const SHORT_MODEL = 'ytd-reel-item-renderer,ytm-reel-item-renderer,ytm-shorts-lockup-view-model,yt-shorts-lockup-view-model,shorts-lockup-view-model';
 
   function onYouTube(url) {
@@ -40,6 +41,12 @@
 
   function shortsCard(element, url) {
     if (element.matches(SHORT_MODEL)) return true;
+    // A card's explicit Shorts badge remains evidence when its thumbnail uses a
+    // normal watch URL. A badge inside a nested shelf/card never labels the outer
+    // rich item, which may also contain ordinary videos.
+    if (element.matches('ytd-rich-item-renderer') &&
+        Array.from(element.querySelectorAll('span[aria-label="Shorts"]')).some(badge =>
+          badge.closest(CARD) === element && !element.contains(badge.closest(SHELF)))) return true;
     const thumbnails = Array.from(element.querySelectorAll('ytd-thumbnail a[href],a#thumbnail[href],a.media-item-thumbnail-container[href],a.yt-lockup-view-model__content-image[href],.yt-lockup-view-model__content-image a[href]'));
     if (thumbnails.length) return thumbnails.every(anchor => shortId(parseLink(anchor, url)));
     return Boolean(element.querySelector(SHORT_MODEL));
@@ -47,8 +54,12 @@
 
   function shortsShelf(element, url) {
     if (element.matches('ytd-reel-shelf-renderer,ytm-reel-shelf-renderer')) return true;
-    // Generic rich shelves often have icons too; only a Shorts renderer is evidence.
-    if (!element.querySelector(SHORT_MODEL)) return false;
+    // The donor also covers rich shelves before Shorts-specific card renderers
+    // arrive. Require the exact section name as well as its icon; a generic icon
+    // alone is common on ordinary shelves.
+    const namedHeading = Array.from(element.querySelectorAll('h2')).some(heading =>
+      heading.textContent.trim() === 'Shorts' && heading.querySelector('yt-icon:not([hidden])'));
+    if (!element.querySelector(SHORT_MODEL) && !namedHeading) return false;
     const cards = Array.from(element.querySelectorAll(CARD));
     if (!cards.every(card => shortsCard(card, url))) return false;
     // Keep an ambiguous shelf if it includes an ordinary video in newer markup.
@@ -60,9 +71,12 @@
 
   function shortsNavigation(element, url) {
     if (element.matches('ytm-pivot-bar-item-renderer') && element.querySelector('.pivot-bar-item-tab.pivot-shorts')) return true;
-    return Array.from(element.querySelectorAll('a[href]')).some(anchor => {
+    if (element.matches(NAV_TITLE) && !element.closest('nav,[role="navigation"],ytd-guide-renderer,ytd-mini-guide-renderer')) return false;
+    const links = Array.from(element.querySelectorAll('a[href]'));
+    if (element.matches('a[href]')) links.unshift(element);
+    return links.some(anchor => {
       const link = parseLink(anchor, url);
-      return onYouTube(link) && /^\/(?:shorts|(?:@[^/]+|(?:channel|c|user)\/[^/]+)\/shorts)\/?$/.test(link.pathname);
+      return onYouTube(link) && (shortId(link) || /^\/(?:shorts|(?:@[^/]+|(?:channel|c|user)\/[^/]+)\/shorts)\/?$/.test(link.pathname));
     });
   }
 
@@ -96,7 +110,7 @@
         }
       }
       if (controls.hideNavigation) {
-        for (const element of candidates(root, NAV)) {
+        for (const element of candidates(root, NAV + ',' + NAV_TITLE)) {
           if (shortsNavigation(element, url)) matches.push({ element, featureId: 'youtube.hideNavigation', effect: 'hide' });
         }
       }

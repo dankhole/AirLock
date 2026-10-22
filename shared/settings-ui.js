@@ -9,7 +9,7 @@
     enabled: "Restrictions", delayMinutes: "Site wait minutes", settingsDelayMinutes: "Settings hold minutes",
     movingTargetEnabled: "Moving target", dailyLockEnabled: "Daily lock", dailyLockStart: "Daily lock starts",
     dailyLockEnd: "Daily lock ends", cooldownUntil: "Manual cooldown", sites: "Tracked sites",
-    siteWaitEnabled: "Site wait", dailyLimits: "Daily limit", dailyLimitPolicies: "Reached-limit action"
+    siteWaitEnabled: "Site wait", siteTrackingEnabled: "Site tracking", dailyLimits: "Daily limit", dailyLimitPolicies: "Reached-limit action"
   };
 
   function formatDuration(ms) {
@@ -40,7 +40,7 @@
     if (typeof value === "boolean") return value ? "On" : "Off";
     if (value == null) return "None";
     if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
-    if (typeof value === "object" && value.mode) return value.mode === "cooldown" ? "Cooldown for " + value.cooldownMinutes + " minutes" : "Block until midnight";
+    if (typeof value === "object" && value.mode) return value.mode === "cooldown" ? "Break for " + value.cooldownMinutes + " minutes, then renew allowance" : "Block until midnight (saved break: " + value.cooldownMinutes + " minutes)";
     return String(value);
   }
   function describePatch(config, patch, catalog) {
@@ -54,11 +54,12 @@
             if (before !== value) differences.push((item ? item.label : rule) + ": " + valueText(before, item) + " → " + valueText(value, item));
           }
         }
-      } else if (["siteWaitEnabled", "dailyLimits", "dailyLimitPolicies"].includes(key)) {
+      } else if (["siteWaitEnabled", "siteTrackingEnabled", "dailyLimits", "dailyLimitPolicies"].includes(key)) {
         for (const [site, value] of Object.entries(next)) {
           const fallbackPolicy = { mode: "block", cooldownMinutes: 60 };
-          const before = key === "siteWaitEnabled" ? (config[key] || {})[site] !== false : (config[key] || {})[site] || (key === "dailyLimitPolicies" ? fallbackPolicy : null);
-          const after = key === "siteWaitEnabled" ? value !== false : value || (key === "dailyLimitPolicies" ? fallbackPolicy : null);
+          const booleanMap = key === "siteWaitEnabled" || key === "siteTrackingEnabled";
+          const before = booleanMap ? (config[key] || {})[site] !== false : (config[key] || {})[site] || (key === "dailyLimitPolicies" ? fallbackPolicy : null);
+          const after = booleanMap ? value !== false : value || (key === "dailyLimitPolicies" ? fallbackPolicy : null);
           if (JSON.stringify(before) !== JSON.stringify(after)) differences.push(labels[key] + " for " + site + ": " + valueText(before) + " → " + valueText(after));
         }
       } else if (JSON.stringify(config[key]) !== JSON.stringify(next)) {
@@ -335,6 +336,7 @@
     if (!state) return "Current access status is unavailable. Open Site settings to review the configured rules.";
     if (state.reason === "untracked") return "Not tracked · no Airlock site gate";
     if (state.reason === "cooldown") return "Manual cooldown until " + formatClock(state.unlockAt);
+    if (state.reason === "paused") return "Tracking paused · site restrictions paused";
     if (state.reason === "disabled") return "Restrictions off · usage tracking continues";
     if (state.reason === "daily-lock") return "Daily lock until " + formatClock(state.unlockAt);
     if (state.reason === "daily-limit") {

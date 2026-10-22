@@ -627,3 +627,75 @@ test("a rejected startup read after disposal cannot schedule a retry", async () 
   assert.equal(context.timeoutCount(), 0);
   assert.equal(context.AirlockPageState.get().ready, false);
 });
+
+test("pausing a live tracked site removes its wait and stops usage until authoritative resume", async () => {
+  const document = createDocument();
+  let response = { type: "SHOW_OVERLAY", remainingMs: 42000, active: true, tracked: true, trackingEnabled: true };
+  const context = createContext(document, { contentReady: () => response, pageState: true });
+  await vm.runInContext(contentSource, context);
+  assert.equal(document.overlayHosts.length, 1);
+  response = { type: "NO_OVERLAY", active: true, tracked: true, trackingEnabled: false };
+  context.emitStorage({ siteTrackingEnabled: { newValue: { "example.com": false } } });
+  await new Promise(resolve => setImmediate(resolve));
+  context.runTimeouts(300);
+  assert.equal(document.overlayHosts.length, 0);
+  assert.equal(context.AirlockPageState.get().coreMode, "none");
+  context.advanceTime(5000);
+  context.runIntervals();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.sentMessages.filter(message => message.type === "DAILY_USAGE_UPDATE").length, 0);
+  response = { type: "NO_OVERLAY", active: true, tracked: true, trackingEnabled: true };
+  context.emitStorage({ siteTrackingEnabled: { newValue: {} } });
+  await new Promise(resolve => setImmediate(resolve));
+  context.advanceTime(1000);
+  context.runIntervals();
+  await new Promise(resolve => setImmediate(resolve));
+  const usage = context.sentMessages.filter(message => message.type === "DAILY_USAGE_UPDATE");
+  assert.equal(usage.length, 1);
+  assert.equal(usage[0].elapsedMs, 1000, "resume does not backfill paused time");
+});
+
+test("initially paused sites run no usage clock while manual cooldown remains visible", async () => {
+  for (const type of ["NO_OVERLAY", "SHOW_COOLDOWN"]) {
+    const document = createDocument();
+    const context = createContext(document, { contentReadyResponse: { type, unlockAt: Date.now() + 3600000,
+      active: true, tracked: true, trackingEnabled: false } });
+    await vm.runInContext(contentSource, context);
+    context.advanceTime(5000);
+    context.runIntervals();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(context.sentMessages.filter(message => message.type === "DAILY_USAGE_UPDATE").length, 0);
+    assert.equal(document.overlayHosts.length, type === "SHOW_COOLDOWN" ? 1 : 0);
+  }
+});
+
+
+test("missing startup background responses keep the core unknown until recovery restores tracking", async () => {
+  for (const unavailable of [undefined, null]) {
+    let calls = 0;
+    const document = createDocument();
+    const context = createContext(document, { pageState: true, contentReady: () => {
+      if (++calls === 1) return unavailable;
+      return { type: "NO_OVERLAY", active: true, tracked: true, trackingEnabled: true };
+    } });
+    await vm.runInContext(contentSource, context);
+    assert.equal(context.AirlockPageState.get().ready, false);
+    assert.equal(context.AirlockPageState.get().coreMode, "unknown");
+    assert.equal(document.overlayHosts.length, 0);
+    context.advanceTime(4000);
+    context.runIntervals();
+    await settle();
+    assert.equal(context.sentMessages.filter(message => message.type === "DAILY_USAGE_UPDATE").length, 0);
+    context.runTimeouts(5000);
+    await settle();
+    assert.equal(calls, 2);
+    assert.equal(context.AirlockPageState.get().ready, true);
+    assert.equal(context.AirlockPageState.get().coreMode, "none");
+    context.advanceTime(1000);
+    context.runIntervals();
+    await settle();
+    const usage = context.sentMessages.filter(message => message.type === "DAILY_USAGE_UPDATE");
+    assert.equal(usage.length, 1);
+    assert.equal(usage[0].elapsedMs, 1000);
+  }
+});

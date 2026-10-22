@@ -995,7 +995,7 @@ test("strict allowlisted patches reject private state, invalid values, and arbit
     { delayMinutes: 0 }, { delayMinutes: 1.5 }, { settingsDelayMinutes: -1 },
     { settingsDelayMinutes: 0.5 }, { settingsDelayMinutes: 601 }, { sites: ["https://youtube.com/"] },
     { siteWaitEnabled: { "other.example": false } }, { dailyLimits: { "example.com": "30" } },
-    { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 2 } } },
+    { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 0 } } },
     { cooldownUntil: context.testClock.now + 1000 }, { contentControls: { instagram: { stories: "off" } } },
     { contentControls: { youtube: { futureRule: true } } }, { dailyLockStart: "25:00" } ];
   for (const patch of patches) {
@@ -1253,4 +1253,171 @@ test("worker startup after cooldown expiry preserves unrelated holds and old-for
     pendingConfigChange: { type: "disableAirlock", remainingMs: 42000, waitMinutes: 1 } }));
   assert.equal(legacy.state.localData.pendingConfigChange.remainingMs, 42000);
   assert.equal(legacy.state.localData.enabled, true);
+});
+
+test("inactive daily-limit preferences persist independently and are reused after adding or removing a limit", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  let result = await requestPatch(context, { dailyLimitPolicies: { "example.com": { mode: "block", cooldownMinutes: 17 } } });
+  assert.equal(result.applied, true);
+  assert.deepEqual(state.localData.dailyLimitPolicies["example.com"], { mode: "block", cooldownMinutes: 17 });
+  assert.equal(state.localData.dailyLimits["example.com"], undefined);
+  result = await requestPatch(context, { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 17 } } });
+  assert.equal(result.applied, true, "changing an inactive policy does not require a hold");
+  result = await requestPatch(context, { dailyLimits: { "example.com": 1 } });
+  assert.equal(result.applied, true);
+  await context.handleDailyUsageUpdate(7, "example.com", 1000);
+  state.localData.dailyUsage.sites["example.com"] = 60000;
+  const limited = await context.handleContentReady(7, "example.com");
+  assert.equal(limited.type, "SHOW_DAILY_LIMIT");
+  assert.equal(limited.dailyLimitMode, "cooldown");
+  assert.equal(state.localData.dailyLimitCooldowns["example.com"], context.testClock.now + 17 * 60000);
+  result = await requestPatch(context, { dailyLimits: { "example.com": null } });
+  assert.equal(result.applied, false);
+  await advanceGuard(context, 60000);
+  assert.deepEqual(state.localData.dailyLimitPolicies["example.com"], { mode: "cooldown", cooldownMinutes: 17 });
+  assert.equal(state.localData.dailyLimits["example.com"], undefined);
+  result = await requestPatch(context, { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 5 } } });
+  assert.equal(result.applied, true);
+});
+
+test("saved block duration survives normalization, restart, and legacy policy changes without a limit", async () => {
+  const { context, state } = await loadBackground(baseConfig({ dailyLimitPolicies: { "example.com": { mode: "block", cooldownMinutes: 23 } } }));
+  assert.deepEqual(structuredClone((await context.readConfig()).dailyLimitPolicies["example.com"]), { mode: "block", cooldownMinutes: 23 });
+  const legacy = context.legacyChangePatch({ type: "changeDailyLimitPolicy", site: "example.com", dailyLimitPolicy: { mode: "cooldown", cooldownMinutes: 23 } }, await context.readConfig());
+  const changed = await requestPatch(context, structuredClone(legacy));
+  assert.equal(changed.applied, true);
+  const restarted = await loadBackground(state.localData);
+  assert.deepEqual(structuredClone((await restarted.context.readConfig()).dailyLimitPolicies["example.com"]), { mode: "cooldown", cooldownMinutes: 23 });
+});
+
+test("policy validation rejects malformed inactive preferences without changing state", async () => {
+  const { context } = await loadBackground(baseConfig());
+  for (const value of [{ mode: "other", cooldownMinutes: 3 }, { mode: "block", cooldownMinutes: 0 },
+    { mode: "block", cooldownMinutes: 1441 }, { mode: "cooldown", cooldownMinutes: "3" },
+    { mode: "cooldown", cooldownMinutes: 1.5 }, { mode: "block", cooldownMinutes: 5, enabled: true }]) {
+    const result = await requestPatch(context, { dailyLimitPolicies: { "example.com": value } });
+    assert.equal(result.reason, "invalid-daily-limit-policy", JSON.stringify(value));
+    assert.equal(result.revision, 0);
+  }
+});
+
+test("active policy weakening stays guarded in atomic patches while inactive policy edits apply", async () => {
+  for (const extra of [{ dailyLimits: { "example.com": null } }, { siteTrackingEnabled: { "example.com": false } }, { enabled: false }]) {
+    const { context, state } = await loadBackground(baseConfig({ dailyLimits: { "example.com": 10 } }));
+    const result = await requestPatch(context, { ...extra, dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 4 } } });
+    assert.equal(result.applied, false);
+    assert.equal(state.localData.dailyLimitPolicies["example.com"], undefined);
+  }
+  for (const extra of [{ enabled: false }, { siteTrackingEnabled: { "example.com": false } }]) {
+    const { context } = await loadBackground(baseConfig({ ...extra, dailyLimits: { "example.com": 10 } }));
+    const result = await requestPatch(context, { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 4 } } });
+    assert.equal(result.applied, true);
+  }
+});
+
+test("pausing is guarded, removes live restrictions, retains settings and timestamps, and rejects usage", async () => {
+  const now = Date.now();
+  const window = activeWindowAroundNow();
+  const { context, state } = await loadBackground(baseConfig({
+    dailyLimits: { "example.com": 1 }, dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 30 } },
+    dailyUsage: { date: localDateKey(), sites: { "example.com": 60000 } },
+    dailyLimitCooldowns: { "example.com": now + 30 * 60000 },
+    dailyLockEnabled: true, dailyLockStart: window.start, dailyLockEnd: window.end
+  }), {}, { now });
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_DAILY_LOCK");
+  const pause = await requestPatch(context, { siteTrackingEnabled: { "example.com": false } });
+  assert.equal(pause.applied, false);
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_DAILY_LOCK");
+  await advanceGuard(context, 60000);
+  const ready = await context.handleContentReady(7, "example.com");
+  assert.equal(ready.type, "NO_OVERLAY");
+  assert.equal(ready.tracked, true);
+  assert.equal(ready.trackingEnabled, false);
+  assert.equal(state.localData.dailyLimits["example.com"], 1);
+  assert.equal(state.localData.dailyLimitCooldowns["example.com"], now + 30 * 60000);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 60000);
+  assert.ok(state.tabMessages.some(({ message }) => message.type === "RECHECK_CONFIG"));
+  const forged = await sendUi(context, { type: "DAILY_USAGE_UPDATE", domain: "example.com", elapsedMs: 5000 },
+    { id: "airlock-test", tab: state.tabs[0], frameId: 0, url: "https://example.com/" });
+  assert.equal(forged.ok, false);
+  assert.equal(state.localData.dailyUsage.sites["example.com"], 60000);
+  const status = (await sendUi(context, { type: "GET_SETTINGS_STATE", tabId: 7 })).currentSiteStatus;
+  assert.equal(status.reason, "paused");
+  assert.equal(status.tracked, true);
+  assert.equal(status.trackingEnabled, false);
+  await context.getDailyLimitState(await context.readConfig(), "example.com", now + 40 * 60000);
+  assert.equal(state.localData.dailyLimitCooldowns["example.com"], now + 30 * 60000, "paused reads do not expire cooldown timestamps");
+});
+
+test("pause and resume preserve earned or unfinished waits and never grant an untouched tab access", async () => {
+  for (const completed of [true, false]) {
+    const now = Date.now();
+    const session = { domain: "example.com", remainingMs: completed ? 0 : 42000, completed, createdAt: now };
+    const { context, state } = await loadBackground(baseConfig(), { session_7: session }, { now });
+    await requestPatch(context, { siteTrackingEnabled: { "example.com": false } });
+    await advanceGuard(context, 60000);
+    await context.handleTimerDone(7);
+    await context.handleTimerUpdate(7, 0);
+    assert.equal(state.sessionData.session_7.completed, completed);
+    assert.equal(state.sessionData.session_7.remainingMs, session.remainingMs);
+    assert.equal((await context.handleContentReady(7, "example.com")).type, "NO_OVERLAY");
+    assert.equal((await requestPatch(context, { siteTrackingEnabled: { "example.com": true } })).applied, true);
+    const resumed = await context.handleContentReady(7, "example.com");
+    assert.equal(resumed.type, completed ? "NO_OVERLAY" : "SHOW_OVERLAY");
+    if (!completed) assert.equal(resumed.remainingMs, 42000);
+  }
+  const { context, state } = await loadBackground(baseConfig({ siteTrackingEnabled: { "example.com": false } }));
+  await context.handleContentReady(7, "example.com");
+  assert.equal(state.sessionData.session_7, undefined);
+  await requestPatch(context, { siteTrackingEnabled: { "example.com": null } });
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_OVERLAY");
+});
+
+test("paused tracking still enforces a global cooldown and preserves independent platform controls", async () => {
+  const until = Date.now() + 3600000;
+  const { context, state } = await loadBackground(baseConfig({ enabled: false, cooldownUntil: until,
+    siteTrackingEnabled: { "example.com": false }, contentControls: { version: 1, youtube: { hideShorts: true } } }));
+  const ready = await context.handleContentReady(7, "example.com");
+  assert.equal(ready.type, "SHOW_COOLDOWN");
+  assert.equal(ready.trackingEnabled, false);
+  const status = (await sendUi(context, { type: "GET_SETTINGS_STATE", tabId: 7 })).currentSiteStatus;
+  assert.equal(status.reason, "cooldown");
+  assert.equal(state.localData.contentControls.youtube.hideShorts, true);
+});
+
+test("tracking pause maps validate, use the most specific site, and clean up on site removal", async () => {
+  const { context, state } = await loadBackground(baseConfig({ sites: ["example.com", "sub.example.com"],
+    siteTrackingEnabled: { "example.com": false, "sub.example.com": true, "untracked.example": false } }));
+  assert.deepEqual(structuredClone((await context.readConfig()).siteTrackingEnabled), { "example.com": false });
+  assert.equal((await context.handleContentReady(7, "www.example.com")).trackingEnabled, false);
+  assert.equal((await context.handleContentReady(7, "child.sub.example.com")).trackingEnabled, true);
+  for (const patch of [{ siteTrackingEnabled: [] }, { siteTrackingEnabled: { "unknown.com": false } }, { siteTrackingEnabled: { "example.com": "false" } }]) {
+    assert.equal((await requestPatch(context, patch)).ok, false);
+  }
+  await requestPatch(context, { sites: ["sub.example.com"] });
+  await advanceGuard(context, 60000);
+  assert.deepEqual(state.localData.siteTrackingEnabled, {});
+  assert.equal(state.localData.sites.includes("example.com"), false);
+});
+
+test("existing pending holds survive adding the default tracking map on upgrade", async () => {
+  const { context, state } = await loadBackground(baseConfig());
+  const started = await requestPatch(context, { enabled: false });
+  await advanceGuard(context, 1000);
+  delete state.localData.pendingConfigChange.baseConfig.siteTrackingEnabled;
+  const restarted = await loadBackground(state.localData);
+  const snapshot = await sendUi(restarted.context, { type: "GET_SETTINGS_STATE" });
+  assert.equal(snapshot.pending.id, started.pending.id);
+  assert.equal(snapshot.pending.remainingMs, 59000);
+  assert.deepEqual(snapshot.pending.baseConfig.siteTrackingEnabled, {});
+});
+
+test("explicit wait-setting changes still reset access while tracking is paused", async () => {
+  const now = Date.now();
+  const { context, state } = await loadBackground(baseConfig({ settingsDelayMinutes: 0, siteTrackingEnabled: { "example.com": false } }),
+    { session_7: { domain: "example.com", remainingMs: 0, completed: true, createdAt: now } });
+  await requestPatch(context, { siteWaitEnabled: { "example.com": false } });
+  assert.equal(state.sessionData.session_7, undefined);
+  await requestPatch(context, { siteWaitEnabled: { "example.com": true }, siteTrackingEnabled: { "example.com": true } });
+  assert.equal((await context.handleContentReady(7, "example.com")).type, "SHOW_OVERLAY");
 });

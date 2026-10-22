@@ -11,6 +11,7 @@ const DEFAULT_CONFIG = {
   enabled: true,
   sites: [],
   siteWaitEnabled: {},
+  siteTrackingEnabled: {},
   delayMinutes: 1,
   settingsDelayMinutes: 1,
   movingTargetEnabled: false,
@@ -87,6 +88,7 @@ async function migrateStoredConfig() {
   const existing = await browser.storage.local.get([
     "enabled",
     "sites",
+    "siteTrackingEnabled",
     "delayMinutes",
     "settingsDelayMinutes",
     "delaySeconds",
@@ -133,6 +135,9 @@ async function migrateStoredConfig() {
   if (typeof existing.movingTargetEnabled !== "boolean") {
     updates.movingTargetEnabled = DEFAULT_CONFIG.movingTargetEnabled;
   }
+
+  const tracking = normalizeSiteTrackingEnabled(existing.siteTrackingEnabled, existing.sites || []);
+  if (!sameData(existing.siteTrackingEnabled || {}, tracking)) updates.siteTrackingEnabled = tracking;
 
   const dailyLimits = normalizeDailyLimits(existing.dailyLimits, existing.sites || []);
   if (!sameData(existing.dailyLimits || {}, dailyLimits)) {
@@ -218,6 +223,7 @@ async function readConfig() {
     "enabled",
     "sites",
     "siteWaitEnabled",
+    "siteTrackingEnabled",
     "delayMinutes",
     "settingsDelayMinutes",
     "movingTargetEnabled",
@@ -235,6 +241,7 @@ async function readConfig() {
     enabled: result.enabled !== false,
     sites: result.sites || [],
     siteWaitEnabled: normalizeSiteWaitEnabled(result.siteWaitEnabled, result.sites || []),
+    siteTrackingEnabled: normalizeSiteTrackingEnabled(result.siteTrackingEnabled, result.sites || []),
     delayMinutes: delayMinutes,
     settingsDelayMinutes: clampSettingsDelayMinutes(
       result.settingsDelayMinutes === undefined ? delayMinutes : result.settingsDelayMinutes
@@ -273,6 +280,15 @@ function isDomainTracked(hostname, sites) {
 function normalizeSiteWaitEnabled(value, sites) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(sites.filter((site) => value[site] === false).map((site) => [site, false]));
+}
+
+function normalizeSiteTrackingEnabled(value, sites) {
+  return normalizeSiteWaitEnabled(value, sites);
+}
+
+function isSiteTrackingEnabled(domain, config) {
+  const site = getTrackedSite(domain, config.sites);
+  return site !== null && config.siteTrackingEnabled[site] !== false;
 }
 
 function requiresSiteWait(domain, config) {
@@ -316,25 +332,18 @@ function clampDailyLimitCooldownMinutes(value) {
 }
 
 function normalizeDailyLimitPolicy(value) {
-  if (!value || value.mode !== "cooldown") {
-    return { mode: "block", cooldownMinutes: DEFAULT_DAILY_LIMIT_COOLDOWN_MINUTES };
-  }
-
   return {
-    mode: "cooldown",
-    cooldownMinutes: clampDailyLimitCooldownMinutes(value.cooldownMinutes)
+    mode: value && value.mode === "cooldown" ? "cooldown" : "block",
+    cooldownMinutes: clampDailyLimitCooldownMinutes(value && value.cooldownMinutes)
   };
 }
 
 function normalizeDailyLimitPolicies(value, sites) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const trackedSites = new Set(sites || []);
-
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([site, policy]) => trackedSites.has(site) && policy && policy.mode === "cooldown")
-      .map(([site, policy]) => [site, normalizeDailyLimitPolicy(policy)])
-  );
+  return Object.fromEntries(Object.entries(value)
+    .filter(([site, policy]) => trackedSites.has(site) && policy && ["block", "cooldown"].includes(policy.mode))
+    .map(([site, policy]) => [site, normalizeDailyLimitPolicy(policy)]));
 }
 
 function isDailyLimitPolicyWeaker(currentPolicy, nextPolicy) {
@@ -523,7 +532,7 @@ async function getDailyLimitState(config, hostname, now = Date.now(), allowCoold
   }
 
   const usage = await readDailyUsage(now);
-  if (limitMinutes === null) {
+  if (limitMinutes === null || !isSiteTrackingEnabled(hostname, config)) {
     return {
       site: site,
       limitMinutes: null,
@@ -819,6 +828,7 @@ async function updateBadge() {
       !s.completed &&
       s.remainingMs > 0 &&
       config.enabled &&
+      isSiteTrackingEnabled(s.domain, config) &&
       requiresSiteWait(s.domain, config)
   ).length;
 
@@ -888,7 +898,14 @@ async function readConfigRevision() {
 
 async function readPendingConfigChange() {
   const result = await browser.storage.local.get(PENDING_CONFIG_CHANGE_KEY);
-  return isPlainMap(result[PENDING_CONFIG_CHANGE_KEY]) ? result[PENDING_CONFIG_CHANGE_KEY] : null;
+  const pending = result[PENDING_CONFIG_CHANGE_KEY];
+  if (!isPlainMap(pending)) return null;
+  // Existing holds predate per-site pauses. Their original configuration has
+  // tracking enabled everywhere, matching the new empty-map default.
+  if (isPlainMap(pending.baseConfig) && pending.baseConfig.siteTrackingEnabled === undefined) {
+    return { ...pending, baseConfig: { ...pending.baseConfig, siteTrackingEnabled: {} } };
+  }
+  return pending;
 }
 
 function createPendingId() {
@@ -933,7 +950,7 @@ function legacyChangePatch(change, config) {
     case "reduceDelay": return { delayMinutes: clampDelayMinutes(change.delayMinutes) };
     case "reduceSettingsDelay": return { settingsDelayMinutes: clampSettingsDelayMinutes(change.settingsDelayMinutes) };
     case "changeDailyLimit": return site && config.sites.includes(site) ? { dailyLimits: { [site]: change.dailyLimitMinutes === null ? null : clampDailyLimitMinutes(change.dailyLimitMinutes) } } : null;
-    case "changeDailyLimitPolicy": return site && config.sites.includes(site) && config.dailyLimits[site] ? { dailyLimitPolicies: { [site]: normalizeDailyLimitPolicy(change.dailyLimitPolicy) } } : null;
+    case "changeDailyLimitPolicy": return site && config.sites.includes(site) ? { dailyLimitPolicies: { [site]: normalizeDailyLimitPolicy(change.dailyLimitPolicy) } } : null;
     case "endCooldown": return { cooldownUntil: null };
     case "disableDailyLock": return { dailyLockEnabled: false };
     case "changeDailyLockSchedule": return { dailyLockStart: change.dailyLockStart, dailyLockEnd: change.dailyLockEnd };
@@ -945,7 +962,7 @@ function validateConfigPatch(config, patch) {
   if (!isPlainMap(patch)) return { reason: "invalid-patch" };
   const allowed = Object.keys(DEFAULT_CONFIG);
   if (Object.keys(patch).some((key) => !allowed.includes(key))) return { reason: "unknown-setting" };
-  const next = { ...config, siteWaitEnabled: { ...config.siteWaitEnabled }, dailyLimits: { ...config.dailyLimits }, dailyLimitPolicies: { ...config.dailyLimitPolicies } };
+  const next = { ...config, siteTrackingEnabled: { ...config.siteTrackingEnabled }, siteWaitEnabled: { ...config.siteWaitEnabled }, dailyLimits: { ...config.dailyLimits }, dailyLimitPolicies: { ...config.dailyLimitPolicies } };
   const booleans = ["enabled", "movingTargetEnabled", "dailyLockEnabled"];
   for (const key of booleans) {
     if (patch[key] === undefined) continue;
@@ -962,14 +979,14 @@ function validateConfigPatch(config, patch) {
     if (!Array.isArray(patch.sites) || patch.sites.length > 1000 || patch.sites.some((site) => !normalizeSite(site))) return { reason: "invalid-sites" };
     next.sites = [...new Set(patch.sites.map(normalizeSite))];
   }
-  for (const key of ["siteWaitEnabled", "dailyLimits", "dailyLimitPolicies"]) {
+  for (const key of ["siteWaitEnabled", "siteTrackingEnabled", "dailyLimits", "dailyLimitPolicies"]) {
     if (patch[key] === undefined) continue;
     if (!isPlainMap(patch[key])) return { reason: "invalid-" + key };
     for (const [site, value] of Object.entries(patch[key])) {
       if (normalizeSite(site) !== site || (!next.sites.includes(site) && !(value === null && config.sites.includes(site)))) return { reason: "site-not-tracked" };
       if (value === null) { delete next[key][site]; continue; }
-      if (key === "siteWaitEnabled") {
-        if (typeof value !== "boolean") return { reason: "invalid-site-wait" };
+      if (key === "siteWaitEnabled" || key === "siteTrackingEnabled") {
+        if (typeof value !== "boolean") return { reason: key === "siteWaitEnabled" ? "invalid-site-wait" : "invalid-site-tracking" };
         if (value) delete next[key][site]; else next[key][site] = false;
       } else if (key === "dailyLimits") {
         if (!Number.isInteger(value) || value < 1 || value > MAX_DAILY_LIMIT_MINUTES) return { reason: "invalid-daily-limit" };
@@ -978,19 +995,14 @@ function validateConfigPatch(config, patch) {
         if (!isPlainMap(value) || !["block", "cooldown"].includes(value.mode) ||
             Object.keys(value).some((field) => !["mode", "cooldownMinutes"].includes(field)) ||
             (value.cooldownMinutes !== undefined && (!Number.isInteger(value.cooldownMinutes) || value.cooldownMinutes < 1 || value.cooldownMinutes > MAX_DAILY_LIMIT_COOLDOWN_MINUTES))) return { reason: "invalid-daily-limit-policy" };
-        if (value.mode === "block") delete next[key][site]; else next[key][site] = normalizeDailyLimitPolicy(value);
+        next[key][site] = normalizeDailyLimitPolicy(value);
       }
     }
   }
   next.siteWaitEnabled = normalizeSiteWaitEnabled(next.siteWaitEnabled, next.sites);
+  next.siteTrackingEnabled = normalizeSiteTrackingEnabled(next.siteTrackingEnabled, next.sites);
   next.dailyLimits = normalizeDailyLimits(next.dailyLimits, next.sites);
   next.dailyLimitPolicies = normalizeDailyLimitPolicies(next.dailyLimitPolicies, next.sites);
-  for (const site of Object.keys(next.dailyLimitPolicies)) {
-    if (!next.dailyLimits[site]) {
-      if (patch.dailyLimitPolicies && patch.dailyLimitPolicies[site] !== undefined && patch.dailyLimitPolicies[site] !== null && patch.dailyLimitPolicies[site].mode !== "block") return { reason: "invalid-daily-limit-policy" };
-      delete next.dailyLimitPolicies[site];
-    }
-  }
   for (const key of ["dailyLockStart", "dailyLockEnd"]) {
     if (patch[key] === undefined) continue;
     if (!dailyLockApi.parseTimeOfDay(patch[key])) return { reason: "invalid-schedule" };
@@ -1016,10 +1028,12 @@ function isConfigWeaker(config, next, patch) {
       config.sites.some((site) => !next.sites.includes(site))) return true;
   if (config.dailyLockEnabled && dailyLockApi.classifyScheduleChange(config.dailyLockStart, config.dailyLockEnd, next.dailyLockStart, next.dailyLockEnd) === "weaker") return true;
   for (const site of config.sites) {
+    if (config.siteTrackingEnabled[site] !== false && next.siteTrackingEnabled[site] === false) return true;
     if (config.siteWaitEnabled[site] !== false && next.siteWaitEnabled[site] === false) return true;
     const previousLimit = config.dailyLimits[site];
     if (previousLimit && (!next.dailyLimits[site] || next.dailyLimits[site] > previousLimit)) return true;
-    if (isDailyLimitPolicyWeaker(config.dailyLimitPolicies[site], next.dailyLimitPolicies[site])) return true;
+    if (config.enabled && config.siteTrackingEnabled[site] !== false && previousLimit &&
+        isDailyLimitPolicyWeaker(config.dailyLimitPolicies[site], next.dailyLimitPolicies[site])) return true;
   }
   return patch.contentControls !== undefined && controlsApi.classifyPatch(config.contentControls, patch.contentControls) === "weaker";
 }
@@ -1089,10 +1103,11 @@ async function getCurrentSiteStatus(tabId, snapshot) {
   const siteCooldown = site ? dailyLimitCooldowns[site] : null;
   const expiredBudget = Number.isFinite(siteCooldown) && siteCooldown <= now;
   const allowanceUsedMs = expiredBudget ? 0 : Math.max(0, todayUsedMs - (site ? dailyLimitUsageOffsets.sites[site] || 0 : 0));
-  const status = { domain, site, tracked: site !== null, active, paused: !active, reason: "allowed", remainingMs: null,
+  const status = { domain, site, tracked: site !== null, trackingEnabled: isSiteTrackingEnabled(domain, config), active, paused: !active, reason: "allowed", remainingMs: null,
     unlockAt: null, resetAt: getNextLocalMidnight(now), todayUsedMs, allowanceUsedMs, dailyLimitMinutes: limit, dailyLimitMode: policy.mode };
   if (!site) status.reason = "untracked";
   else if (config.cooldownUntil) { status.reason = "cooldown"; status.unlockAt = config.cooldownUntil; }
+  else if (!isSiteTrackingEnabled(domain, config)) status.reason = "paused";
   else if (!config.enabled) status.reason = "disabled";
   else if (getDailyLockState(config, now).locked) { status.reason = "daily-lock"; status.unlockAt = getDailyLockState(config, now).unlockAt; }
   else if (limit && allowanceUsedMs >= limit * MINUTE_MS) { status.reason = "daily-limit"; status.resetAt = siteCooldown > now ? siteCooldown : getNextLocalMidnight(now); }
@@ -1279,6 +1294,8 @@ async function reconcileExpiredSessions() {
       await removeSession(tabId);
       continue;
     }
+    // Pausing retains access already earned and does not finish an untouched wait.
+    if (!isSiteTrackingEnabled(session.domain, config)) continue;
     let currentSession = session;
 
     const createdAt = currentSession.createdAt || now;
@@ -1370,7 +1387,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
 
   if (changes.contentControls || changes.configRevision) broadcastConfigRecheck();
 
-  if (changes.enabled || changes.sites || changes.siteWaitEnabled || changes.delayMinutes) {
+  if (changes.enabled || changes.sites || changes.siteWaitEnabled || changes.siteTrackingEnabled || changes.delayMinutes) {
     reconcileExpiredSessions().catch((error) => {
       console.warn("[Airlock] Failed to reconcile expired sessions:", error);
     });
@@ -1380,6 +1397,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     changes.enabled ||
     changes.sites ||
     changes.siteWaitEnabled ||
+    changes.siteTrackingEnabled ||
     changes.dailyLimits ||
     changes.dailyLimitPolicies ||
     changes.dailyLimitCooldowns ||
@@ -1526,6 +1544,11 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleContentReady(tabId, domain) {
   const config = await getConfig();
+  const result = await resolveContentReady(tabId, domain, config);
+  return { ...result, tracked: isDomainTracked(domain, config.sites), trackingEnabled: isSiteTrackingEnabled(domain, config) };
+}
+
+async function resolveContentReady(tabId, domain, config) {
   const active = await isTabActiveAndFocused(tabId);
 
   if (!isDomainTracked(domain, config.sites)) {
@@ -1543,7 +1566,7 @@ async function handleContentReady(tabId, domain) {
     };
   }
 
-  if (!config.enabled) {
+  if (!config.enabled || !isSiteTrackingEnabled(domain, config)) {
     return {
       type: "NO_OVERLAY",
       active: active
@@ -1636,8 +1659,16 @@ async function handleContentReady(tabId, domain) {
   }, dailyLimitState);
 }
 
-async function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
-  const config = await getConfig();
+function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
+  // Keep usage writes ordered with settings changes, so a pause cannot be
+  // followed by a delayed write that used the pre-pause configuration.
+  return enqueueSettingsCommand(async () => {
+    await reconcilePendingConfigChangeInternal();
+    return recordDailyUsageUpdate(tabId, domain, elapsedMs, await readConfig());
+  });
+}
+
+async function recordDailyUsageUpdate(tabId, domain, elapsedMs, config) {
   const now = Date.now();
   const requestedElapsed = Math.max(
     0,
@@ -1646,8 +1677,8 @@ async function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
   const elapsed = Math.min(requestedElapsed, Math.max(0, now - getCurrentLocalMidnight(now)));
   const active = await isTabActiveAndFocused(tabId);
 
-  if (!active || elapsed <= 0 || !isDomainTracked(domain, config.sites)) {
-    return { ok: false, reached: false };
+  if (!active || elapsed <= 0 || !isSiteTrackingEnabled(domain, config)) {
+    return { ok: false, reached: false, trackingEnabled: isSiteTrackingEnabled(domain, config) };
   }
 
   const dailyLockState = getDailyLockState(config, now);
@@ -1695,7 +1726,7 @@ async function handleDailyUsageUpdate(tabId, domain, elapsedMs) {
 
 async function handleTimerDone(tabId) {
   const session = await getSession(tabId);
-  if (session) {
+  if (session && isSiteTrackingEnabled(session.domain, await getConfig())) {
     session.remainingMs = 0;
     session.completed = true;
     await setSession(tabId, session);
@@ -1704,7 +1735,7 @@ async function handleTimerDone(tabId) {
 
 async function handleTimerUpdate(tabId, remainingMs) {
   const session = await getSession(tabId);
-  if (session) {
+  if (session && isSiteTrackingEnabled(session.domain, await getConfig())) {
     session.remainingMs = remainingMs;
     await setSession(tabId, session);
   }

@@ -135,6 +135,55 @@ test("no guesses before authoritative settings, and stale reads cannot re-enable
   f.dispose();
 });
 
+test("temporary startup settings failure retries authoritatively and hidden or disposed pages stop retries", async () => {
+  const saved = {enabled: true, contentControls: controlsApi.getDefaults(), configRevision: 3};
+  saved.contentControls.youtube.hideShorts = true;
+  let reads = 0;
+  const f = fixture({get: async () => {
+    if (++reads === 1) throw new Error('temporary storage failure');
+    return saved;
+  }});
+  await f.flush();
+  assert.equal(f.runtime.getStatus().initialized, false);
+  assert.equal(f.window.document.querySelector('[data-airlock-hidden]'), null);
+  assert.equal([...f.timers.values()].filter(timer => timer.delay === 5000).length, 1);
+  await f.flush(5000);
+  await f.flush();
+  assert.equal(reads, 2);
+  assert.equal(f.runtime.getStatus().revision, 3);
+  assert(f.window.document.querySelector('[data-airlock-hidden]'));
+  assert.equal([...f.timers.values()].filter(timer => timer.delay === 5000).length, 0);
+  f.dispose();
+
+  const hidden = fixture({get: async () => { throw new Error('still unavailable'); }});
+  await hidden.flush();
+  assert.equal([...hidden.timers.values()].filter(timer => timer.delay === 5000).length, 1);
+  hidden.window.dispatchEvent(new hidden.window.PageTransitionEvent('pagehide', {persisted: true}));
+  assert.equal(hidden.timers.size, 0);
+  hidden.window.dispatchEvent(new hidden.window.PageTransitionEvent('pageshow', {persisted: true}));
+  await hidden.flush();
+  assert.equal([...hidden.timers.values()].filter(timer => timer.delay === 5000).length, 1);
+  hidden.dispose();
+  assert.equal(hidden.timers.size, 0);
+});
+
+test("the reported Instagram Reel URL redirects without relying on a DOM match once the core allows it", async () => {
+  const saved = {enabled: true, contentControls: controlsApi.getDefaults(), configRevision: 4};
+  saved.contentControls.instagram.blockReels = true;
+  const f = fixture({url: 'https://www.instagram.com/reels/DcPL-RdxD7v/',
+    html: '<!doctype html><main><p>No Reel-specific DOM markers</p></main>',
+    adapter: require('../content/controls/sites/instagram.js'), get: async () => saved});
+  f.state.setCore({ready: false, coreMode: 'unknown'});
+  await f.flush();
+  assert.equal(f.runtime.getStatus().active, true);
+  assert.equal(f.visits.length, 0);
+  f.state.setCore({ready: true, coreMode: 'none'});
+  await f.flush();
+  assert.deepEqual(f.visits, ['https://www.instagram.com/']);
+  assert.equal(f.runtime.getStatus().failure, null);
+  f.dispose();
+});
+
 test("live disable restores independent marks, and re-enable filters without changing host styles", async () => {
   const f = fixture({ html: "<div data-feature='first' data-overlap style='color:red'></div>" });
   f.config.contentControls.youtube.hideNavigation = true;
@@ -314,6 +363,8 @@ test("unsupported hosts and future schemas do not activate observers", async () 
   await future.flush();
   assert.equal(future.observed, 0);
   assert.equal(future.runtime.getStatus().active, false);
+  assert.equal([...future.timers.values()].some(timer => timer.delay === 5000), false,
+    'An authoritative unsupported schema is not a transient storage failure');
   future.dispose();
 });
 

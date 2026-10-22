@@ -30,7 +30,7 @@ async function loadSurface(t, surface = "options", overrides = {}, options = {})
   let snapshot = {
     ok: true, revision: 1, pending: null, contentControlsSupported: true,
     config: { enabled: true, sites: ["example.com"], delayMinutes: 2, settingsDelayMinutes: 2, movingTargetEnabled: false,
-      siteWaitEnabled: {}, dailyLimits: {}, dailyLimitPolicies: {}, cooldownUntil: null,
+      siteWaitEnabled: {}, siteTrackingEnabled: {}, dailyLimits: {}, dailyLimitPolicies: {}, cooldownUntil: null,
       dailyLockEnabled: false, dailyLockStart: "22:00", dailyLockEnd: "07:00", contentControls: controls.getDefaults(), ...overrides },
     usage: { date: "2026-09-30", sites: { "example.com": 90_000 } }, dailyLimitCooldowns: {},
     currentSiteStatus: { domain: "current.example", site: null, reason: "untracked", tracked: false, active: true, paused: false, ...options.currentSiteStatus }
@@ -49,7 +49,7 @@ async function loadSurface(t, surface = "options", overrides = {}, options = {})
   function apply(patch) {
     for (const [key, value] of Object.entries(patch)) {
       if (key === "contentControls") snapshot.config.contentControls = controls.mergePatch(snapshot.config.contentControls, value);
-      else if (["siteWaitEnabled", "dailyLimits", "dailyLimitPolicies"].includes(key)) {
+      else if (["siteWaitEnabled", "siteTrackingEnabled", "dailyLimits", "dailyLimitPolicies"].includes(key)) {
         for (const [site, item] of Object.entries(value)) { if (item === null) delete snapshot.config[key][site]; else snapshot.config[key][site] = item; }
       } else snapshot.config[key] = value;
     }
@@ -199,12 +199,51 @@ test("tracked-site controls retain wait, budget, reached-limit policy, cooldown 
     ["site-limit-example.com", "20", { dailyLimits: { "example.com": 20 } }],
     ["site-policy-example.com", "cooldown", { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 60 } } }],
     ["site-cooldown-example.com", "45", { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 45 } } }],
-    ["site-policy-example.com", "block", { dailyLimitPolicies: { "example.com": null } }],
+    ["site-policy-example.com", "block", { dailyLimitPolicies: { "example.com": { mode: "block", cooldownMinutes: 45 } } }],
     ["site-limit-example.com", "", { dailyLimits: { "example.com": null } }]
   ]) { await env.dispatch(id, value); await env.confirm(); assert.deepEqual(env.requests.at(-1).patch, patch); }
   env.document.querySelector(".site-remove").click(); await settle(); await env.confirm();
   assert.deepEqual(env.requests.at(-1).patch, { sites: [] });
   assert.equal(env.document.querySelectorAll(".site-detail").length, 0);
+});
+
+test("inactive limit preferences stay editable and changing break duration does not enable the action", async (t) => {
+  const env = await loadSurface(t, "options", { enabled: false });
+  const cooldown = env.document.getElementById("site-cooldown-example.com");
+  assert.equal(cooldown.disabled, false);
+  assert.equal(env.document.getElementById("site-policy-example.com").disabled, false);
+  await env.dispatch(cooldown.id, "15");
+  assert.match(env.document.getElementById("confirm-dialog-differences").textContent, /saved break: 15 minutes/);
+  await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { dailyLimitPolicies: { "example.com": { mode: "block", cooldownMinutes: 15 } } });
+  assert.deepEqual(env.snapshot.config.dailyLimits, {});
+  assert.equal(env.snapshot.config.enabled, false);
+  await env.dispatch("site-policy-example.com", "cooldown"); await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { dailyLimitPolicies: { "example.com": { mode: "cooldown", cooldownMinutes: 15 } } });
+  assert.deepEqual(env.snapshot.config.dailyLimits, {});
+});
+
+test("each collapsed site can pause and resume tracking without removing its settings or totals", async (t) => {
+  const env = await loadSurface(t, "options", { dailyLimits: { "example.com": 30 }, siteWaitEnabled: { "example.com": false } });
+  const id = "site-tracking-example.com";
+  assert.equal(env.document.querySelector(".site-detail").open, false);
+  assert.equal(env.document.querySelector(".site-detail").contains(env.document.getElementById(id)), false, "pause remains outside collapsed details");
+  await env.dispatch(id, undefined, "click");
+  assert.match(env.document.getElementById("confirm-dialog-differences").textContent, /Site tracking for example.com: On → Off/);
+  await env.confirm("cancel");
+  assert.deepEqual(env.snapshot.config.siteTrackingEnabled, {});
+  await env.dispatch(id, undefined, "click"); await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { siteTrackingEnabled: { "example.com": false } });
+  assert.equal(env.document.getElementById(id).textContent, "Resume");
+  assert.match(env.document.querySelector(".site-usage").textContent, /^Paused/);
+  assert.equal(env.document.getElementById("site-limit-example.com").disabled, false);
+  assert.deepEqual(env.snapshot.config.dailyLimits, { "example.com": 30 });
+  assert.deepEqual(env.snapshot.usage.sites, { "example.com": 90000 });
+  assert.equal(env.document.activeElement.id, id);
+  await env.dispatch(id, undefined, "click"); await env.confirm();
+  assert.deepEqual(env.requests.at(-1).patch, { siteTrackingEnabled: { "example.com": null } });
+  assert.deepEqual(env.snapshot.config.siteTrackingEnabled, {});
+  assert.equal(env.document.getElementById(id).textContent, "Pause");
 });
 
 test("popup and options can add a tracked site with no entry wait", async (t) => {

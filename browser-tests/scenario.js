@@ -3,6 +3,7 @@ const path=require("node:path");
 const assert=require("node:assert/strict");
 const {root,poll}=require("./driver");
 const {runUiChecks}=require("./ui-checks");
+const {runSiteSettingsChecks}=require("./site-settings-checks");
 
 async function runScenario(browser,t) {
   t.diagnostic(`${browser.name} ${browser.version}; actual temporary extension, synthetic HTTPS site origins`);
@@ -100,6 +101,7 @@ async function runScenario(browser,t) {
     await poll(()=>browser.evaluate(pages[site],()=>getComputedStyle(document.getElementById("short-card")).display),value=>value!=="none",`${site} disable restores computed visibility`);
     assert.equal(await browser.evaluate(pages[site],()=>document.querySelectorAll("[data-airlock-hidden],[data-airlock-subdued]").length),0,`${site} marks removed`);
   }
+  await runSiteSettingsChecks(browser,options,pages.youtube,artifacts,t);
   await browser.focus(options);
   await browser.screenshot(options,path.join(artifacts,"options-desktop.png"),1280);
   await browser.screenshot(options,path.join(artifacts,"options-narrow.png"),390);

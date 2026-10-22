@@ -8,7 +8,7 @@
   const STORIES = '[data-focus-target="stories_tray"],[data-pagelet="Stories"]';
   const UNIT = '[data-pagelet^="FeedUnit"],[role="article"],[data-pagelet^="Reels"],li,[data-mcomponent="MContainer"],[data-sigil="mtop-section"],[data-sigil="mComposite"]';
   const HEADINGS = 'h2,h3,[role="heading"],[data-mcomponent="TextArea"]';
-  const SIGNALS = `${STORIES},${HEADINGS},a[href],[aria-label],[data-pagelet^="Reels"],[data-sigil],[data-store]`;
+  const SIGNALS = `${STORIES},${HEADINGS},span,a[href],[aria-label],[data-pagelet^="Reels"],[data-sigil],[data-store]`;
 
   function onFacebook(url) {
     return url && /^https?:$/.test(url.protocol) && (url.hostname === 'facebook.com' || url.hostname.endsWith('.facebook.com'));
@@ -73,6 +73,29 @@
       child === anchor || anchor.contains(child) || child.contains(anchor));
   }
 
+  function spanReelTray(element, url) {
+    if (!element.matches('span') || element.childElementCount || !REEL_HEADERS.has(text(element))) return null;
+    const unit = unitContainer(element, true);
+    if (!unit || unit.querySelector('p,article,[contenteditable="true"],[role="textbox"]')) return null;
+    const destinations = new Set();
+    for (const anchor of unit.querySelectorAll('a[href]')) {
+      const target = linkUrl(anchor, url);
+      if (target && reelRoute(target) && anchor.querySelector('img,video')) {
+        destinations.add(target.origin + target.pathname.replace(/\/$/, ''));
+      }
+    }
+    if (destinations.size < 2) return null;
+    // Facebook posts often use spans rather than paragraphs. Text outside the
+    // tray label/cards/actions is still an ordinary caption, even with Reel URLs.
+    const textNodes = unit.ownerDocument.createTreeWalker(unit, 4 /* SHOW_TEXT */);
+    for (let node = textNodes.nextNode(); node; node = textNodes.nextNode()) {
+      if (!node.textContent.trim() || element.contains(node) ||
+          node.parentElement.closest('a[href],button,[role="button"]')) continue;
+      return null;
+    }
+    return unit;
+  }
+
   function soleWrapper(element) {
     let top = element;
     for (let depth = 0; depth < 3; depth++) {
@@ -126,6 +149,8 @@
           mark(unitContainer(element, true), 'facebook.hideSuggested', true);
         }
         if (!controls.hideReels) continue;
+        const spanTray = spanReelTray(element, url);
+        if (spanTray) mark(spanTray, 'facebook.hideReels', true);
         const labelled = exactReelLabel(element);
         const pagelet = element.matches('[data-pagelet^="Reels"]');
         // Mobile sigils are a token list, not a substring of an arbitrary JSON value.

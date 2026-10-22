@@ -4,10 +4,11 @@
   const client = AirlockSettingsClient.create(browser);
   const controller = ui.createController(client, { catalog: AirlockControls.catalog });
   const enabled = document.getElementById("enabled-toggle");
-  const coreModes = { wait: "timer", cooldown: "cooldown", "daily-lock": "dailyLock", "daily-limit": "dailyLimit", allowed: "none", disabled: "none", untracked: "none" };
+  const coreModes = { wait: "timer", cooldown: "cooldown", "daily-lock": "dailyLock", "daily-limit": "dailyLimit", allowed: "none", disabled: "none", untracked: "none", paused: "none" };
   const probeRetryDelays = [150, 400, 1000];
   let currentDomain = null;
   let currentTabId = null;
+  let currentSite = null;
   let hostAccess = null;
   let pageState = null;
   let currentSnapshot = null;
@@ -28,31 +29,72 @@
     const patch = ui.appendTrackingPatch(client.snapshot.config, currentDomain, document.getElementById("add-site-wait").checked);
     await controller.change(patch, "Track " + currentDomain + "?", ["Content-control preferences stay independently configured."]);
   });
+  document.getElementById("current-tracking-btn").addEventListener("click", async () => {
+    if (!currentSite || !client.snapshot) return;
+    const paused = client.snapshot.config.siteTrackingEnabled && client.snapshot.config.siteTrackingEnabled[currentSite] === false;
+    await controller.change({ siteTrackingEnabled: { [currentSite]: paused ? null : false } },
+      (paused ? "Resume" : "Pause") + " tracking for " + currentSite + "?",
+      [paused
+        ? "Focused usage and this site's waits, daily locks and limits resume with their existing settings and totals."
+        : "Focused usage, site waits, daily locks and limits pause. Your settings and today's usage stay saved.",
+      "A global manual cooldown and independent platform content rules still apply."]);
+  });
   function render(snapshot) {
     const config = snapshot.config;
     enabled.checked = config.enabled !== false;
     controller.renderCooldown(config);
+    const cooldownActive = Number(config.cooldownUntil) > Date.now();
+    document.getElementById("cooldown-btn").textContent = cooldownActive ? "End early…" : "Start 1 hour";
+    document.getElementById("cooldown-status").textContent = cooldownActive
+      ? "All tracked sites blocked until " + ui.formatClock(config.cooldownUntil) + ", even with Restrictions off."
+      : "Blocks all tracked sites for 1 hour.";
     const siteState = snapshot.currentSiteStatus;
     const matched = siteState && siteState.site || (currentDomain && config.sites.find((site) => currentDomain === site || currentDomain.endsWith("." + site)));
     const tracked = Boolean(matched);
+    currentSite = matched || null;
     const platform = AirlockControls.getPlatform(currentDomain || "");
     document.getElementById("current-site-title").textContent = matched || currentDomain || "This page cannot be tracked";
+    document.getElementById("current-site-title").title = matched || currentDomain || "This page cannot be tracked";
     const expectedMode = siteState && coreModes[siteState.reason];
     let access = ui.accessSummary(siteState, config);
-    if (hostAccess === false) access = "Access needed · allow this website in the browser’s extension permissions.";
-    else if (!pageState || !pageState.ready) access = "Page status unavailable · reload this website to connect Airlock.";
-    else if (expectedMode && pageState.coreMode !== expectedMode) access = "Page status updating · configured access: " + access;
+    if (hostAccess === false) access = "Access needed · allow this site in extension permissions.";
+    else if (!pageState || !pageState.ready) access = "Page status unavailable · reload this site.";
+    else if (expectedMode && pageState.coreMode !== expectedMode) access = "Page status updating · " + access;
     document.getElementById("current-access").textContent = currentDomain ? access : "Open a website to inspect its Airlock status.";
     const usage = tracked ? (snapshot.usage && snapshot.usage.sites && snapshot.usage.sites[matched]) || 0 : null;
     const limit = matched && config.dailyLimits && config.dailyLimits[matched];
-    document.getElementById("current-usage").textContent = tracked ? ui.formatDuration(usage) + (limit ? " today · " + limit + " min limit" : " today") : "Not tracked · usage is not recorded";
+    document.getElementById("current-usage").textContent = tracked ? ui.formatDuration(usage) + (limit ? " · " + limit + " min limit" : "") : "Not tracked";
     const allowance = siteState && siteState.dailyLimitMode === "cooldown" && siteState.dailyLimitMinutes;
     document.getElementById("current-allowance-row").hidden = !allowance;
     document.getElementById("current-allowance").textContent = allowance ? ui.formatDuration(siteState.allowanceUsedMs) + " of " + siteState.dailyLimitMinutes + " min · resets after limit cooldown" : "";
     document.getElementById("current-rules").textContent = snapshot.contentControlsSupported === false ? "Requires a newer Airlock version" : ui.rulesSummary(config, platform, AirlockControls.catalog);
+    const configuredRules = platform && AirlockControls.catalog.filter((item) => item.platform === platform && config.contentControls[platform][item.key] !== item.default).length;
+    let rulesStatus = snapshot.contentControlsSupported === false ? "Content rules: update required"
+      : !platform ? "Content rules: unsupported site"
+      : !configuredRules ? "Content rules: Off · none enabled"
+      : config.enabled === false ? "Content rules: paused by Restrictions"
+      : "Content rules: " + configuredRules + " enabled";
+    if (platform && configuredRules && config.enabled !== false && snapshot.contentControlsSupported !== false) {
+      const runtime = pageState && pageState.runtimeStatus;
+      if (hostAccess === false) rulesStatus = "Content rules: allow site access";
+      else if (pageState && Object.prototype.hasOwnProperty.call(pageState, "runtimeStatus")) {
+        if (!runtime || runtime.disposed) rulesStatus = "Content rules: reload to connect";
+        else if (runtime.failure) rulesStatus = "Content rules: error · reload this site";
+        else if (runtime.initialized === false) rulesStatus = "Content rules: loading settings · reload if stuck";
+      }
+    }
+    document.getElementById("current-rules-status").textContent = rulesStatus;
     document.getElementById("site-settings-link").href = browser.runtime.getURL("options/options.html") + "#" + (platform || "sites");
+    document.getElementById("site-settings-link").textContent = platform ? "Content rules ↗" : "Site settings ↗";
     document.getElementById("track-current-section").hidden = !currentDomain || tracked;
-    document.getElementById("add-current-btn").textContent = "Track " + (currentDomain || "this site");
+    document.getElementById("add-current-btn").textContent = "Track this site";
+    document.getElementById("add-current-btn").setAttribute("aria-label", "Track " + (currentDomain || "this site"));
+    const trackingButton = document.getElementById("current-tracking-btn");
+    const trackingPaused = tracked && config.siteTrackingEnabled && config.siteTrackingEnabled[matched] === false;
+    trackingButton.hidden = !tracked;
+    trackingButton.textContent = trackingPaused ? "Resume tracking" : "Pause tracking";
+    trackingButton.setAttribute("aria-label", (trackingPaused ? "Resume" : "Pause") + " tracking for " + matched);
+    document.getElementById("pending-config-title").title = snapshot.pending && snapshot.pending.description || "Settings change awaiting hold";
     controller.lock();
   }
   function pageStateMatches(expectedMode) {

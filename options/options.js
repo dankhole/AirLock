@@ -117,13 +117,21 @@
     if (!config.sites.length) list.appendChild(element("p", "help empty-sites", "No tracked sites yet. Add a site below to record focused usage and configure access restrictions."));
     config.sites.forEach((site) => {
       const suffix = encodeURIComponent(site);
+      const paused = (config.siteTrackingEnabled || {})[site] === false;
+      const row = element("div", "site-row");
       const details = element("details", "site-detail"); details.dataset.site = site; details.open = openSites.has(site);
       const summary = element("summary");
       summary.id = "site-summary-" + suffix;
       summary.append(element("span", "site-domain", site));
       const usage = element("span", "site-usage"); usage.dataset.site = site; summary.appendChild(usage);
       details.appendChild(summary);
+      const pause = element("button", "site-tracking-toggle", paused ? "Resume" : "Pause");
+      pause.id = "site-tracking-" + suffix; pause.type = "button"; pause.dataset.setting = "";
+      pause.setAttribute("aria-label", (paused ? "Resume" : "Pause") + " tracking for " + site);
+      pause.addEventListener("click", () => controller.change({ siteTrackingEnabled: { [site]: paused ? null : false } }, (paused ? "Resume" : "Pause") + " tracking for " + site + "?", [paused ? "Resume focused usage, site waits, scheduled locks, and limits with the saved settings and totals." : "Pause usage counting, site waits, scheduled locks, and limits. Keep this site’s settings and usage totals. Manual cooldown and independent content rules still apply."]));
       const fields = element("div", "site-fields");
+      const trackingHelp = element("p", "help site-tracking-status", paused ? "Paused for downtime. Settings below stay editable; resume to apply them." : "Tracking active. Pause for downtime without removing this site’s settings.");
+      fields.appendChild(trackingHelp);
       const wait = element("input", "site-wait-input"); wait.id = "site-wait-" + suffix; wait.type = "checkbox"; wait.dataset.setting = ""; wait.checked = (config.siteWaitEnabled || {})[site] !== false;
       const waitLabel = element("label", "check-label"); waitLabel.htmlFor = wait.id; waitLabel.append(wait, element("span", "", "Require site wait")); fields.appendChild(waitLabel);
       wait.addEventListener("change", () => {
@@ -139,26 +147,25 @@
       });
       const policy = (config.dailyLimitPolicies || {})[site] || { mode: "block", cooldownMinutes: 60 };
       const select = element("select", "site-policy-input"); select.id = "site-policy-" + suffix;
-      for (const [value, label] of [["block", "Block until midnight"], ["cooldown", "Start a site cooldown"]]) { const option = element("option", "", label); option.value = value; select.appendChild(option); }
-      select.value = policy.mode; select.dataset.dependentDisabled = (config.dailyLimits || {})[site] ? "false" : "true";
-      fields.appendChild(settingField(select, "When the limit is reached", "Requires a daily limit. A site cooldown resets the allowance when it ends; Today usage remains the daily total."));
+      for (const [value, label] of [["block", "Block until midnight"], ["cooldown", "Take a break"]]) { const option = element("option", "", label); option.value = value; select.appendChild(option); }
+      select.value = policy.mode;
+      fields.appendChild(settingField(select, "When this site’s limit is reached", "Saved even without a limit. A break blocks only this site, then renews its allowance. Today’s total does not reset."));
       const cooldown = element("input", "site-cooldown-input"); cooldown.id = "site-cooldown-" + suffix; cooldown.type = "number"; cooldown.min = "1"; cooldown.max = "1440"; cooldown.step = "1"; cooldown.value = policy.cooldownMinutes || 60;
-      cooldown.dataset.dependentDisabled = policy.mode !== "cooldown" || !(config.dailyLimits || {})[site] ? "true" : "false";
-      fields.appendChild(settingField(cooldown, "Site cooldown in minutes", "Used with the site-cooldown action. Range: 1–1440 minutes."));
+      fields.appendChild(settingField(cooldown, "Break duration in minutes", "Saved independently. Applies only when the break action and a limit are active. Range: 1–1440 minutes."));
       function changePolicy(fromCooldown) {
         const current = (client.snapshot.config.dailyLimitPolicies || {})[site] || { mode: "block", cooldownMinutes: 60 };
-        const mode = fromCooldown ? "cooldown" : select.value;
-        const minutes = mode === "cooldown" ? validNumber(cooldown, 1, 1440) : current.cooldownMinutes;
+        const mode = fromCooldown ? current.mode : select.value;
+        const minutes = fromCooldown ? validNumber(cooldown, 1, 1440) : current.cooldownMinutes;
         if (minutes === undefined) return;
         select.value = current.mode; cooldown.value = current.cooldownMinutes || 60; dirty.delete(select.id); dirty.delete(cooldown.id);
-        controller.change({ dailyLimitPolicies: { [site]: mode === "block" ? null : { mode, cooldownMinutes: minutes } } }, "Change reached-limit action for " + site + "?");
+        controller.change({ dailyLimitPolicies: { [site]: { mode, cooldownMinutes: minutes } } }, "Change limit preferences for " + site + "?");
       }
       select.addEventListener("change", () => changePolicy(false)); cooldown.addEventListener("change", () => changePolicy(true));
       const cooldownCopy = element("p", "help site-cooldown-status"); cooldownCopy.dataset.site = site; fields.appendChild(cooldownCopy);
-      const remove = element("button", "danger site-remove", "Stop tracking…"); remove.type = "button"; remove.dataset.setting = "";
+      const remove = element("button", "danger site-remove", "Remove site…"); remove.type = "button"; remove.dataset.setting = "";
       remove.setAttribute("aria-label", "Stop tracking " + site);
       remove.addEventListener("click", () => controller.change({ sites: client.snapshot.config.sites.filter((value) => value !== site) }, "Stop tracking " + site + "?", ["Remove its usage tracking, site wait, daily limit, and site-cooldown settings. Independently configured platform content rules stay saved."]));
-      fields.appendChild(remove); details.appendChild(fields); list.appendChild(details);
+      fields.appendChild(remove); details.appendChild(fields); row.append(details, pause); list.appendChild(row);
     });
     drafts.forEach((value, id) => { const node = document.getElementById(id); if (node) { if (node.type === "checkbox") node.checked = value; else node.value = value; } });
     if (focusedId && !document.activeElement.id && document.getElementById(focusedId)) document.getElementById(focusedId).focus();
@@ -225,7 +232,7 @@
       controls.catalog.forEach((item) => { const input = document.getElementById("rule-" + item.id); if (!dirty.has(input.id)) { if (item.type === "boolean") input.checked = config.contentControls[item.platform][item.key]; else input.value = config.contentControls[item.platform][item.key]; } });
       renderSites(snapshot); renderedRevision = snapshot.revision;
     }
-    document.querySelectorAll(".site-usage").forEach((node) => { const site = node.dataset.site; const used = snapshot.usage && snapshot.usage.sites && snapshot.usage.sites[site] || 0; const limit = (config.dailyLimits || {})[site]; node.textContent = ui.formatDuration(used) + " today" + (limit ? " · " + limit + " min limit" : ""); });
+    document.querySelectorAll(".site-usage").forEach((node) => { const site = node.dataset.site; const used = snapshot.usage && snapshot.usage.sites && snapshot.usage.sites[site] || 0; const limit = (config.dailyLimits || {})[site]; node.textContent = ((config.siteTrackingEnabled || {})[site] === false ? "Paused · " : "") + ui.formatDuration(used) + " today" + (limit ? " · " + limit + " min limit" : ""); });
     document.querySelectorAll(".site-cooldown-status").forEach((node) => { const until = (snapshot.dailyLimitCooldowns || {})[node.dataset.site]; node.textContent = until && until > Date.now() ? "Site cooldown until " + ui.formatClock(until) + ". Allowance resets then; Today usage remains recorded." : ""; });
     controller.renderCooldown(config);
     const schedule = AirlockDailyLock.getState({ enabled: config.enabled !== false && config.dailyLockEnabled, start: config.dailyLockStart, end: config.dailyLockEnd });
